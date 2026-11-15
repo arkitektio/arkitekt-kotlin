@@ -169,6 +169,9 @@ class Runtime(
                         services = built
                 )
 
+        // What the app provides for injection, made now that the clients exist.
+        app.providers.forEach { context.provided += it(context) }
+
         // Tell the deployment which aliases actually answered. Best-effort; never throws.
         val reports = envelope.instances.keys.associateWith { key ->
             val alias = instances[key]

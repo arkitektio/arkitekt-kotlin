@@ -6,27 +6,27 @@ runtime logs it in and serves it, and plain functions become actions that anyone
 Arkitekt deployment can run.
 
 ```kotlin
+import live.arkitekt.Action
 import live.arkitekt.App
 import live.arkitekt.Runtime
-import live.arkitekt.rekuest.graphql.type.PortKind
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonPrimitive
 
-// An App is a declaration: nothing is contacted here.
-val app = App("greeter", "0.1.0")
-        .action(
-                "greet",
-                name = "Greet",
-                description = "Say hello to someone.",
-                ports = {
-                    arg("name", PortKind.STRING, "Who to greet")
-                    returns("greeting", PortKind.STRING, "What was said")
-                }
-        ) { _, args ->
-            mapOf("greeting" to JsonPrimitive("Hello ${args["name"]!!.jsonPrimitive.content}"))
-        }
+/**
+ * Greet
+ *
+ * Say hello to someone.
+ *
+ * @param name Who to greet
+ * @param times How often
+ * @return What was said
+ */
+@Action
+fun greet(name: String, times: Int = 1): String = "Hello $name! ".repeat(times).trim()
 
 suspend fun main() {
+    // An App is a declaration: nothing is contacted here. `GreetAction` is written by the
+    // processor from the function above.
+    val app = App("greeter", "0.1.0").action(GreetAction)
+
     // `connect` authorizes the app (a browser page, once), builds its clients and registers
     // its actions; `serve` runs what the deployment assigns, until it is cancelled.
     val connection = Runtime(app).connect("https://go.arkitekt.live")
@@ -34,11 +34,46 @@ suspend fun main() {
 }
 ```
 
+## Actions from functions
+
+`@Action` on a top-level function makes it an action, as `@register` does in Python and
+`#[action]` in Rust. A [KSP](https://kotlinlang.org/docs/ksp-overview.html) processor reads the
+function when it is compiled and writes `<FunctionName>Action` beside it: the definition, and
+the handler that turns the arguments off the wire into the parameters and the result back.
+Nothing is looked up by reflection at run time.
+
+- **Ports** come from the signature: `String`, `Int`/`Long`, `Float`/`Double`, `Boolean`, a
+  `List` of those, and any class whose companion object is a `Structure`. A nullable type is a
+  nullable port. So is a parameter with a default value: the default applies when nothing is
+  sent (at most four such parameters).
+- **Words** come from the KDoc. With more than one paragraph the first is the action's name and
+  the rest its description; a single paragraph is the description, and the name is the
+  function's (`showLens` → "Show Lens"). `@param` describes a port, `@return` the result.
+- **`@Action(key, name, description)`** overrides what is derived; the key is the function's
+  name in snake case otherwise. **`@Returns("key")`** names the return (`return0` otherwise).
+- **`@Inject`** marks a parameter the app fills instead of the caller, found by its type: the
+  `Context`, a declared service's client, or what the app provides with `App.provide(…)`.
+
+A structure travels by id, under an identifier:
+
+```kotlin
+class Lens(val id: String) {
+    companion object : IdStructure<Lens>("@mikro/lens", ::Lens, Lens::id)
+}
+
+@Action
+suspend fun showLens(lens: Lens, @Inject viewer: Viewer): Lens { … }
+```
+
+A function the processor cannot make an action of fails the build, at the function, saying why.
+An action can still be declared by hand with `App.action(key, name, …) { context, args -> … }`.
+
 ## What is in it
 
 | | |
 | --- | --- |
-| `App`, `Ports`, `Action` | What an app is: its identifier and version, the services it needs, its actions and their ports |
+| `App`, `Ports` | What an app is: its identifier and version, the services it needs, its actions and their ports |
+| `@Action`, `@Inject`, `@Returns`, `Structure` | Actions written as plain functions, and the processor (`arkitekt-kotlin-ksp`) that reads them |
 | `Service`, `Context` | A service an app asks for and how its client is built; a handler gets clients with `context[service]` |
 | `Runtime`, `Connection` | Logs an app in, builds its `Context`, registers and serves its actions |
 | `FaktsClient`, `TokenManager`, `FaktsCache` | The login: discovery, the OAuth2 device-code grant, token rotation, the kept login |
@@ -74,10 +109,15 @@ It is not published to a Maven repository yet. Use it as a Gradle composite buil
 // settings.gradle.kts
 includeBuild("../arkitekt-kotlin")
 // build.gradle.kts
-dependencies { implementation("live.arkitekt:arkitekt-kotlin") }
+plugins { id("com.google.devtools.ksp") version "2.1.0-1.0.29" }   // for @Action
+dependencies {
+    implementation("live.arkitekt:arkitekt-kotlin")
+    ksp("live.arkitekt:arkitekt-kotlin-ksp")
+}
 ```
 
 ## Not here yet
 
-States, locks, child calls and workflows; registering over the socket (`REGISTER` carries no
+States, locks, child calls and workflows; several returns, enums, dictionaries and dates as
+ports, and reporting progress from inside an action; registering over the socket (`REGISTER` carries no
 declaration, actions are registered with `implementAgent`); a journal that survives a restart.

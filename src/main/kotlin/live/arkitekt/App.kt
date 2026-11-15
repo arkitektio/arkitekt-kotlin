@@ -28,7 +28,7 @@ import live.arkitekt.rekuest.graphql.type.ReturnPortInput
 typealias Handler = suspend (Context, Map<String, JsonElement?>) -> Map<String, JsonElement?>
 
 /** One action an app offers: what it takes and returns, and the function that does it. */
-class Action(val definition: DefinitionInput, val handler: Handler) {
+class RegisteredAction(val definition: DefinitionInput, val handler: Handler) {
     val key: String get() = definition.key
 }
 
@@ -111,6 +111,25 @@ class Context(
         val tokens: TokenManager,
         private val services: Map<Service<*>, Any> = emptyMap()
 ) {
+    /** What the app provides beside its services ([App.provide]). */
+    internal val provided: MutableList<Any> = mutableListOf()
+
+    /**
+     * Something of type [type]: this context, a declared service's client, or what the app
+     * provides. What an `@Inject` parameter of an action is filled with.
+     */
+    fun <T : Any> inject(type: Class<T>): T {
+        val found =
+                if (type.isInstance(this)) this
+                else (services.values + provided).firstOrNull { type.isInstance(it) }
+        return type.cast(
+                found
+                        ?: throw IllegalStateException(
+                                "Nothing of type ${type.name} to inject: declare its service or provide it on the App"
+                        )
+        )
+    }
+
     /** The client of a service the app declared. */
     @Suppress("UNCHECKED_CAST")
     operator fun <T : Any> get(service: Service<T>): T =
@@ -138,8 +157,11 @@ class App(val identifier: String, val version: String) {
     /** The declared services whose clients a [Runtime] builds, in order. */
     val services: MutableList<Service<*>> = mutableListOf()
 
+    /** What is made at login for `@Inject` parameters, beside the services' clients. */
+    val providers: MutableList<(Context) -> Any> = mutableListOf()
+
     /** The actions, by key, in the order they were declared. */
-    val actions: LinkedHashMap<String, Action> = LinkedHashMap()
+    val actions: LinkedHashMap<String, RegisteredAction> = LinkedHashMap()
 
     fun description(text: String): App = apply { description = text }
 
@@ -155,6 +177,22 @@ class App(val identifier: String, val version: String) {
         requirements += Requirement(key = key, service = service, optional = optional)
     }
 
+    /** Make [value] available to `@Inject` parameters of its type (a host object, say). */
+    fun provide(value: Any): App = apply { providers += { value } }
+
+    /** The same, for something built from the login: its clients are in the [Context]. */
+    fun provide(factory: (Context) -> Any): App = apply { providers += factory }
+
+    /** Offer an action written as an `@Action` function: `action(ShowLensAction)`. */
+    fun action(declared: ActionDeclaration): App = apply {
+        val action = declared.declare(version)
+        require(action.key !in actions) { "$identifier already declares an action '${action.key}'" }
+        actions[action.key] = action
+    }
+
+    /** Offer several `@Action` functions at once. */
+    fun actions(vararg declared: ActionDeclaration): App = apply { declared.forEach { action(it) } }
+
     /**
      * Offer an action. [key] is what the server assigns by, [name] and [description] what a
      * person reads; [ports] declares the arguments and returns, and [handler] does the work.
@@ -169,7 +207,7 @@ class App(val identifier: String, val version: String) {
         require(key !in actions) { "$identifier already declares an action '$key'" }
         val declared = Ports().apply(ports)
         actions[key] =
-                Action(
+                RegisteredAction(
                         DefinitionInput(
                                 key = key,
                                 version = version,

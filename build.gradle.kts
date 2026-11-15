@@ -2,6 +2,8 @@ plugins {
     kotlin("jvm") version "2.1.0"
     kotlin("plugin.serialization") version "2.1.0"
     id("com.apollographql.apollo") version "4.0.0"
+    // Only for this project's own tests, which declare @Action functions.
+    id("com.google.devtools.ksp") version "2.1.0-1.0.29"
     `java-library`
     `maven-publish`
 }
@@ -27,6 +29,9 @@ dependencies {
     implementation("io.ktor:ktor-client-core:3.0.2")
     implementation("io.ktor:ktor-client-cio:3.0.2")
     implementation("io.ktor:ktor-client-websockets:3.0.2")
+
+    // The processor, run over the test sources: its output is what DeclaredActionTest checks.
+    kspTest(project(":arkitekt-kotlin-ksp"))
 
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
