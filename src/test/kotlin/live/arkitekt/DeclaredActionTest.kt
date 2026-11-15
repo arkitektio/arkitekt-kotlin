@@ -80,13 +80,13 @@ class DeclaredActionTest {
         val definition = GrowAction.declare("1").definition
         val (box, by) = definition.args.getOrNull()!!
         // The alias's Requires; its Provides is the return's business.
-        assertEquals(listOf("@test/size GTE 3"), box.requires.getOrNull()!!.map { "${it.key} ${it.operator} ${it.value}" })
-        assertEquals(listOf(listOf(1L, 2L)), by.requires.getOrNull()!!.map { it.value })
+        assertEquals(listOf("@test/size GTE 3"), box.requires.getOrNull()!!.map { "${it.key} ${it.operator} ${it.value.getOrNull()}" })
+        assertEquals(listOf<Any?>(listOf(1L, 2L)), by.requires.getOrNull()!!.map { it.value.getOrNull() })
         assertEquals(PortKind.STRUCTURE, box.kind) // the alias is seen through
         assertEquals(
                 setOf("@test/size LTE 10", "@test/size GTE 3"),
                 definition.returns.getOrNull()!!.single().provides.getOrNull()!!
-                        .map { "${it.key} ${it.operator} ${it.value}" }.toSet()
+                        .map { "${it.key} ${it.operator} ${it.value.getOrNull()}" }.toSet()
         )
     }
 

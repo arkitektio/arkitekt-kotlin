@@ -11,9 +11,8 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
 import live.arkitekt.rekuest.graphql.type.ProvidesInput
-import live.arkitekt.rekuest.graphql.type.ProvidesOperator
+import live.arkitekt.rekuest.graphql.type.DescriptorOperator as WireOperator
 import live.arkitekt.rekuest.graphql.type.RequiresInput
-import live.arkitekt.rekuest.graphql.type.RequiresOperator
 
 // What a port requires of a structure, and what it says of one it returns.
 //
@@ -88,9 +87,11 @@ class Constraint(val key: String, val operator: DescriptorOperator, val value: J
             }
     )
 
-    fun requires(): RequiresInput = RequiresInput(key, RequiresOperator.safeValueOf(operator.name), plain(value)!!)
+    fun requires(): RequiresInput =
+            RequiresInput(key, WireOperator.safeValueOf(operator.name), Optional.presentIfNotNull(plain(value)))
 
-    fun provides(): ProvidesInput = ProvidesInput(key, ProvidesOperator.safeValueOf(operator.name), plain(value)!!)
+    fun provides(): ProvidesInput =
+            ProvidesInput(key, WireOperator.safeValueOf(operator.name), Optional.presentIfNotNull(plain(value)))
 
     override fun toString(): String = "$key ${operator.name} $value"
 

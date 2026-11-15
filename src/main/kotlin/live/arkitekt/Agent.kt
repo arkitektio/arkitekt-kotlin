@@ -59,7 +59,7 @@ public class Agent(
                 app.actions.values.map { action ->
                     ImplementationInput(
                             definition = action.definition,
-                            `interface` = Optional.present(action.key)
+                            `interface` = action.key
                     )
                 }
 
@@ -435,11 +435,15 @@ public class Agent(
                                             println("Ignoring undecodable message: $it -- $text")
                                             null
                                         }
-                        if (msg != null && !handle(msg)) break
+                        val goOn = msg == null || handle(msg)
+                        // Recorded and acknowledged even when the frame ends the connection:
+                        // the server numbers KICK and BOUNCE too, and one left unacknowledged
+                        // is sent again on every reconnect, bouncing the agent forever.
                         if (pos != null) {
                             commandsSeen = pos
-                            send(AgentEvent.CommandAck(pos))
+                            runCatching { send(AgentEvent.CommandAck(pos)) }
                         }
+                        if (!goOn) break
                     }
                 }
 

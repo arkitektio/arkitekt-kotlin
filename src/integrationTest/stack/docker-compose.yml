@@ -1,0 +1,110 @@
+# The rekuest the integration test runs against: the server, takt (the agent protocol), a
+# gateway in front of both, database, redis and object storage, with static tokens. A copy of
+# rekuest's own test stack (github.com/arkitektio/rekuest, tests/integration).
+services:
+  redis:
+    image: redis:latest
+  db:
+    image: jhnnsrs/daten:latest
+    restart: always
+    environment:
+      POSTGRES_MULTIPLE_DATABASES: rekuest
+      POSTGRES_PASSWORD: hello_django
+      POSTGRES_USER: hello_django
+  # rekuest is a pair: the server (GraphQL, migrations) and takt (the agent protocol),
+  # released together under the same tags. The tests reach both through one port, so
+  # the service they know as `rekuest` is a small gateway: /agi and /agent go to takt,
+  # everything else to the server.
+  rekuest:
+    image: caddy:2
+    command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    stop_grace_period: 1s
+    configs:
+    - source: gateway
+      target: /etc/caddy/Caddyfile
+    depends_on:
+      rekuest-server:
+        condition: service_started
+      takt:
+        condition: service_healthy
+    ports:
+    - "${REKUEST_HOST_PORT:-5690}:80"
+  # Brings the database to the image's release, once, before the server and takt are
+  # started: a service's own start only serves.
+  rekuest-migrate:
+    depends_on:
+    - db
+    image: jhnnsrs/rekuest:${REKUEST_SERVICE_TAG:-latest}
+    command: arkitekt-service run migrate
+    volumes:
+    - ./configs/rekuest.yaml:/workspace/config.yaml
+  rekuest-server:
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_started
+      rustfs:
+        condition: service_started
+      rekuest-migrate:
+        condition: service_completed_successfully
+    image: jhnnsrs/rekuest:${REKUEST_SERVICE_TAG:-latest}
+    command: arkitekt-service debug
+    stop_grace_period: 1s
+    environment:
+      # The server asks takt through the socket the two mount; the URL then only gives the
+      # path. An image from before the socket ignores it and uses the URL whole.
+      REKUEST__TAKT_URL: http://takt:8080
+      REKUEST__TAKT_SOCKET: /run/takt/internal.sock
+    volumes:
+    - ./configs/rekuest.yaml:/workspace/config.yaml
+    - takt_run:/run/takt
+  takt:
+    depends_on:
+    - redis
+    - db
+    - rekuest-server
+    image: jhnnsrs/rekuest-takt:${REKUEST_SERVICE_TAG:-latest}
+    stop_grace_period: 1s
+    environment:
+      REKUEST__SERVER_URL: http://rekuest-server:80
+      TAKT_INTERNAL_BIND: unix:/run/takt/internal.sock
+    volumes:
+    - ./configs/rekuest.yaml:/workspace/config.yaml:ro
+    - takt_run:/run/takt
+  rustfs:
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_SECRET_KEY: e8821a29d189789e39c9922a3bfcfb4a
+      RUSTFS_ACCESS_KEY: crappygreysetter
+    image: rustfs/rustfs:latest
+    ports:
+    - "${RUSTFS_HOST_PORT:-5691}:9000"
+  initc:
+    depends_on:
+      rustfs:
+        condition: service_started
+    environment:
+      RUSTFS_HOST: http://rustfs:9000
+      RUSTFS_SECRET_KEY: e8821a29d189789e39c9922a3bfcfb4a
+      RUSTFS_ACCESS_KEY: crappygreysetter
+    image: jhnnsrs/init:latest
+    volumes:
+    - ./configs/rustfs.yaml:/workspace/config.yaml
+
+
+volumes:
+  takt_run:
+configs:
+  gateway:
+    content: |
+      :80 {
+        @takt path /agi /agi/* /agent /agent/*
+        handle @takt {
+          reverse_proxy takt:8080
+        }
+        handle {
+          reverse_proxy rekuest-server:80
+        }
+      }

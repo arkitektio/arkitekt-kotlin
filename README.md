@@ -136,6 +136,14 @@ Rekuest is required by every app and needs no declaration.
 Built with JDK 17 and compiled to Java 8 bytecode, so hosts such as Fiji can load it. The tests
 need no server: the agent's lifecycle runs against a local stand-in for the gateway.
 
+```sh
+./gradlew integrationTest   # needs Docker
+```
+
+starts a real rekuest and takt (`src/integrationTest/stack`, a copy of rekuest's own test stack)
+and runs an agent against them: an assigned task comes back with its result, and a task whose
+connection is dropped half way still runs once and is reported once.
+
 It is not published to a Maven repository yet. Use it as a Gradle composite build:
 
 ```kotlin

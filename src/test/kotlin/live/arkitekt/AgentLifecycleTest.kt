@@ -124,6 +124,27 @@ class AgentLifecycleTest {
     }
 
     @Test
+    fun `a numbered BOUNCE is recorded, so it is not sent again after the reconnect`() = runBlocking {
+        // The real server numbers BOUNCE like a command. Leaving on it without recording its
+        // position got the agent the same BOUNCE on every reconnect, for good.
+        val gw = FakeGateway { index, session ->
+            with(session) {
+                sendJson(init(readUntil { it.contains("REGISTER") }))
+                sendJson(
+                        if (index == 0) """{"type":"BOUNCE","id":"b1","duration":0,"pos":4}"""
+                        else """{"type":"KICK","id":"k1"}"""
+                )
+                drain()
+            }
+        }
+        val agent = agentAgainst(gw)
+        withTimeout(30_000) { agent.provideForever() }
+
+        val registers = gw.received.filter { it.contains("\"REGISTER\"") }
+        assertTrue(registers[1].contains("\"commands_seen\":4"), registers[1])
+    }
+
+    @Test
     fun `REGISTER carries the same session id across reconnects`() = runBlocking {
         val gw = FakeGateway { index, session ->
             with(session) {

@@ -44,6 +44,33 @@ tasks.test {
     useJUnitPlatform()
 }
 
+// Tests against a real rekuest and takt, started in Docker (src/integrationTest/stack). Their own
+// source set and task, so `test` and `build` stay server-free: `./gradlew integrationTest`.
+val integrationTest: SourceSet by sourceSets.creating {
+    // The library, and the unit tests' helpers (a login that needs no server).
+    compileClasspath += sourceSets.main.get().output + sourceSets.test.get().output
+    runtimeClasspath += sourceSets.main.get().output + sourceSets.test.get().output
+}
+configurations[integrationTest.implementationConfigurationName].extendsFrom(configurations.testImplementation.get())
+configurations[integrationTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
+dependencies {
+    // The integration test's actions are @Action functions, run through the processor.
+    add("kspIntegrationTest", project(":arkitekt-kotlin-ksp"))
+}
+
+tasks.register<Test>("integrationTest") {
+    group = "verification"
+    description = "Runs an agent against a real rekuest and takt (needs Docker)"
+    testClassesDirs = integrationTest.output.classesDirs
+    classpath = integrationTest.runtimeClasspath
+    useJUnitPlatform()
+    shouldRunAfter(tasks.test)
+    // Where the stack's compose file is, and never a stale "up to date": the server is the input.
+    systemProperty("arkitekt.stack", file("src/integrationTest/stack").absolutePath)
+    outputs.upToDateWhen { false }
+    testLogging { events("passed", "failed", "skipped") }
+}
+
 // Built with a JDK 17 toolchain, compiled to Java 8 bytecode: hosts such as Fiji still run it.
 kotlin {
     jvmToolchain(17)
