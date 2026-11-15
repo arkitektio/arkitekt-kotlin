@@ -1,0 +1,13 @@
+mutation EnsureAgent($input: AgentInput!) {
+  ensureAgent(input: $input) {
+    id
+    hash
+  }
+}
+
+mutation ImplementAgent($input: ImplementAgentInput!) {
+  implementAgent(input: $input) {
+    id
+    hash
+  }
+}
