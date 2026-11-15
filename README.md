@@ -65,6 +65,34 @@ class Lens(val id: String) {
 suspend fun showLens(lens: Lens, @Inject viewer: Viewer): Lens { … }
 ```
 
+### Requires and provides
+
+A structure has descriptors: facts about one object under a key a service declares
+(`@mikro/n_space_axes` = 3). A port states constraints over them. On an argument they are what
+it requires (a picker offers only objects that fit, and the server matches on them); on a
+return, what the action provides.
+
+As in Python's `Annotated[Lens, Requires(…), Provides(…)]`, a spec is a type alias that carries
+both, and each port keeps its own side:
+
+```kotlin
+@Requires(N_SPACE_AXES, DescriptorOperator.EQUALS, "3")
+@Provides(N_SPACE_AXES, DescriptorOperator.EQUALS, "3")
+typealias Volume = Lens
+
+@Action
+suspend fun deconvolve(image: Volume): Volume { … }
+```
+
+A constraint can also be written where it is used: `@Requires` on a parameter, `@Provides` on
+the function. Both repeat. The value is JSON text, since an annotation cannot hold any value:
+`"3"`, `"\"tif\""`, `"[\"tif\", \"tiff\"]"`.
+
+A structure that implements `describe` is also tested when it crosses a constrained port: an
+argument after it is expanded, a return before it is shrunk. One that does not fit fails the
+task, naming the constraint and the actual value. A key `describe` does not return is not
+tested, and `describe` is only called for a port that states a constraint.
+
 A function the processor cannot make an action of fails the build, at the function, saying why.
 An action can still be declared by hand with `App.action(key, name, …) { context, args -> … }`.
 
@@ -74,6 +102,7 @@ An action can still be declared by hand with `App.action(key, name, …) { conte
 | --- | --- |
 | `App`, `Ports` | What an app is: its identifier and version, the services it needs, its actions and their ports |
 | `@Action`, `@Inject`, `@Returns`, `Structure` | Actions written as plain functions, and the processor (`arkitekt-kotlin-ksp`) that reads them |
+| `@Requires`, `@Provides`, `Descriptors` | What a port requires of a structure and says of one it returns, declared and tested |
 | `Service`, `Context` | A service an app asks for and how its client is built; a handler gets clients with `context[service]` |
 | `Runtime`, `Connection` | Logs an app in, builds its `Context`, registers and serves its actions |
 | `FaktsClient`, `TokenManager`, `FaktsCache` | The login: discovery, the OAuth2 device-code grant, token rotation, the kept login |

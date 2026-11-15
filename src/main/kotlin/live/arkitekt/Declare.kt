@@ -85,6 +85,13 @@ interface Structure<T> {
 
     /** The id a value travels as. */
     fun shrink(value: T): String
+
+    /**
+     * The descriptors of a value: what a port's [Requires] and [Provides] are tested against
+     * when the value crosses it. A key left out is not tested. Nothing by default, so nothing
+     * is tested; called only for a port that states a constraint.
+     */
+    suspend fun describe(context: Context, value: T): Map<String, JsonElement> = emptyMap()
 }
 
 /** A [Structure] that is its id and nothing more: nothing is fetched to expand it. */
@@ -150,6 +157,30 @@ object Wire {
     fun <T> shrink(structure: Structure<T>, value: T): JsonElement = buildJsonObject {
         put("__identifier", structure.identifier)
         put("object", structure.shrink(value))
+    }
+
+    /**
+     * Test a structure crossing a port against the port's constraints, by what the structure
+     * says of the value ([Structure.describe]). [side] is "requires" or "provides".
+     *
+     * @throws IllegalArgumentException naming the constraints the value breaks: the task fails.
+     */
+    suspend fun <T> check(
+            structure: Structure<T>,
+            context: Context,
+            value: T,
+            constraints: List<Constraint>,
+            side: String,
+            port: String
+    ) {
+        val described = structure.describe(context, value)
+        if (described.isEmpty()) return
+        val broken = Descriptors.unfulfilled(constraints, described)
+        if (broken.isNotEmpty()) {
+            throw IllegalArgumentException(
+                    "'$port' is not what the port $side: ${broken.joinToString("; ")}"
+            )
+        }
     }
 
     fun json(value: String): JsonElement = JsonPrimitive(value)

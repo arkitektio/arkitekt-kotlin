@@ -12,7 +12,9 @@ import com.google.devtools.ksp.symbol.KSAnnotated
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSFunctionDeclaration
 import com.google.devtools.ksp.symbol.KSNode
+import com.google.devtools.ksp.symbol.KSAnnotation
 import com.google.devtools.ksp.symbol.KSType
+import com.google.devtools.ksp.symbol.KSTypeAlias
 import com.google.devtools.ksp.symbol.KSValueParameter
 import com.google.devtools.ksp.symbol.Modifier
 
@@ -20,6 +22,8 @@ private const val ACTION = "live.arkitekt.Action"
 private const val INJECT = "live.arkitekt.Inject"
 private const val RETURNS = "live.arkitekt.Returns"
 private const val STRUCTURE = "live.arkitekt.Structure"
+private const val REQUIRES = "live.arkitekt.Requires"
+private const val PROVIDES = "live.arkitekt.Provides"
 
 /** A parameter with a default value is tried in every present/absent combination: 2^n calls. */
 private const val MAX_DEFAULTS = 4
@@ -80,6 +84,10 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
         val name = annotation.string("name").ifEmpty { doc.name ?: functionName.titleCase() }
         val description = annotation.string("description").ifEmpty { doc.description }
 
+        // Constraint lists, written once as fields of the generated object: the definition and
+        // the run-time checks read the same ones.
+        val fields = mutableListOf<String>()
+
         // Parameters: a port each, unless injected.
         val ports = mutableListOf<String>()
         val fixed = mutableListOf<Pair<String, String>>() // parameter name -> expression
@@ -89,21 +97,22 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
             val parameterName =
                     parameter.name?.asString() ?: throw Refused("a parameter without a name", parameter)
             if (parameter.isVararg) throw Refused("a vararg cannot be a port: take a List", parameter)
-            val type = parameter.type.resolve()
             if (parameter.has(INJECT)) {
-                fixed += parameterName to "context.inject(${type.className(parameter)}::class.java)"
+                val injected = unalias(parameter.type.resolve()).type
+                fixed += parameterName to "context.inject(${injected.className(parameter)}::class.java)"
                 continue
             }
-            val nullable = type.isMarkedNullable || parameter.hasDefault
-            ports += port("ArgPortInput", parameterName, type, nullable, doc.params[parameterName], parameter)
-            val decode = decode(type.makeNotNullable(), "it", parameter)
+            val plan = plan(parameter.type.resolve(), parameter.annotations.toList(), REQUIRES, fields, parameter)
+            val nullable = plan.nullable || parameter.hasDefault
+            ports += port("ArgPortInput", parameterName, plan, nullable, doc.params[parameterName])
+            val decode = decode(plan, "it", parameterName)
             when {
                 parameter.hasDefault -> {
                     defaulted += parameterName to parameterName
                     decoders[parameterName] =
                             "live.arkitekt.Wire.required(args, ${parameterName.literal()}).let { $decode }"
                 }
-                type.isMarkedNullable ->
+                plan.nullable ->
                         fixed += parameterName to
                                 "live.arkitekt.Wire.optional(args, ${parameterName.literal()})?.let { $decode }"
                 else ->
@@ -123,10 +132,13 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
         val returns = function.annotation(RETURNS)
         val returnKey = returns?.string("key")?.ifEmpty { null } ?: "return0"
         val returnDescription = returns?.string("description")?.ifEmpty { null } ?: doc.returns
-        val isUnit = returned.declaration.qualifiedName?.asString() == "kotlin.Unit"
+        val isUnit = unalias(returned).type.declaration.qualifiedName?.asString() == "kotlin.Unit"
+        val returnPlan =
+                if (isUnit) null
+                else plan(returned, function.annotations.toList(), PROVIDES, fields, function)
         val returnPorts =
-                if (isUnit) emptyList()
-                else listOf(port("ReturnPortInput", returnKey, returned, returned.isMarkedNullable, returnDescription, function))
+                if (returnPlan == null) emptyList()
+                else listOf(port("ReturnPortInput", returnKey, returnPlan, returnPlan.nullable, returnDescription))
 
         val target = function.qualifiedName?.asString() ?: throw Refused("a function without a name", function)
 
@@ -157,12 +169,12 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
                     append("                    }")
                 }
         val body =
-                if (isUnit) "$invocation\n                    emptyMap()"
+                if (returnPlan == null) "$invocation\n                    emptyMap()"
                 else {
                     val encode =
-                            if (returned.isMarkedNullable)
-                                    "result?.let { ${encode(returned.makeNotNullable(), "it", function)} } ?: kotlinx.serialization.json.JsonNull"
-                            else encode(returned, "result", function)
+                            if (returnPlan.nullable)
+                                    "result?.let { ${encode(returnPlan, "it", returnKey)} } ?: kotlinx.serialization.json.JsonNull"
+                            else encode(returnPlan, "result", returnKey)
                     "val result = $invocation\n                    mapOf(${returnKey.literal()} to $encode)"
                 }
 
@@ -183,6 +195,8 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
             appendLine()
             appendLine("/** The action `$key`, made of [$functionName]. Register it with `App.action($objectName)`. */")
             appendLine("object $objectName : live.arkitekt.ActionDeclaration {")
+            fields.forEach { appendLine("    $it") }
+            if (fields.isNotEmpty()) appendLine()
             appendLine("    override fun declare(version: String): live.arkitekt.RegisteredAction =")
             appendLine("            live.arkitekt.RegisteredAction(")
             appendLine("                DefinitionInput(")
@@ -213,11 +227,57 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
 
     private sealed class Kind {
         data class Scalar(val port: String, val reader: String) : Kind()
-        data class ListOf(val item: KSType) : Kind()
+        data class ListOf(val item: Plan) : Kind()
         data class Struct(val qualified: String) : Kind()
     }
 
-    private fun kind(type: KSType, at: KSNode): Kind {
+    /** A type with its aliases followed: the type they name, and what they said on the way. */
+    private class Unaliased(val type: KSType, val nullable: Boolean, val markers: List<KSAnnotation>)
+
+    private fun unalias(type: KSType): Unaliased {
+        var current = type
+        var nullable = type.isMarkedNullable
+        val markers = mutableListOf<KSAnnotation>()
+        while (true) {
+            val alias = current.declaration as? KSTypeAlias ?: break
+            markers += alias.annotations
+            current = alias.type.resolve()
+            nullable = nullable || current.isMarkedNullable
+        }
+        return Unaliased(current.makeNotNullable(), nullable, markers)
+    }
+
+    /**
+     * How one port (or a list's item) travels: its kind, whether it may be null, and the field
+     * holding its constraints, if it states any.
+     */
+    private class Plan(val kind: Kind, val nullable: Boolean, val constraints: String?)
+
+    /**
+     * Plan the port of [type]. Its constraints are the [side]'s markers (`Requires` for an
+     * argument, `Provides` for a return) among [markers] (written at the use) and on the type
+     * aliases [type] goes through (written on a spec).
+     */
+    private fun plan(type: KSType, markers: List<KSAnnotation>, side: String, fields: MutableList<String>, at: KSNode): Plan {
+        val unaliased = unalias(type)
+        val constraints =
+                (markers + unaliased.markers)
+                        .filter { it.annotationType.resolve().declaration.qualifiedName?.asString() == side }
+                        .map { marker ->
+                            val operator = marker.arguments.first { it.name?.asString() == "operator" }.value
+                            "live.arkitekt.Constraint(${marker.string("key").literal()}, " +
+                                    "live.arkitekt.DescriptorOperator.${operator.toString().substringAfterLast('.')}, " +
+                                    "${(marker.arguments.firstOrNull { it.name?.asString() == "value" }?.value as? String ?: "true").literal()})"
+                        }
+        val field =
+                if (constraints.isEmpty()) null
+                else "constraints${fields.size}".also {
+                    fields += "private val $it = listOf(${constraints.joinToString(", ")})"
+                }
+        return Plan(kind(unaliased.type, side, fields, at), unaliased.nullable, field)
+    }
+
+    private fun kind(type: KSType, side: String, fields: MutableList<String>, at: KSNode): Kind {
         val declaration = type.declaration
         val qualified = declaration.qualifiedName?.asString() ?: throw Refused("a type without a name", at)
         return when (qualified) {
@@ -229,8 +289,14 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
             "kotlin.Boolean" -> Kind.Scalar("BOOL", "boolean")
             "kotlin.collections.List" ->
                     Kind.ListOf(
-                            type.arguments.firstOrNull()?.type?.resolve()
-                                    ?: throw Refused("a List without an item type", at)
+                            plan(
+                                    type.arguments.firstOrNull()?.type?.resolve()
+                                            ?: throw Refused("a List without an item type", at),
+                                    emptyList(),
+                                    side,
+                                    fields,
+                                    at
+                            )
                     )
             else -> {
                 val companion =
@@ -263,50 +329,67 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
     }
 
     /** A port, as the constructor call of [portClass] (`ArgPortInput` or `ReturnPortInput`). */
-    private fun port(
-            portClass: String,
-            key: String,
-            type: KSType,
-            nullable: Boolean,
-            description: String?,
-            at: KSNode
-    ): String {
-        val base = "key = ${key.literal()}, description = ${optional(description)}, nullable = Optional.present($nullable)"
-        return when (val kind = kind(type.makeNotNullable(), at)) {
+    private fun port(portClass: String, key: String, plan: Plan, nullable: Boolean, description: String?): String {
+        // An argument keeps what it requires, a return what it provides.
+        val constrained =
+                when {
+                    plan.constraints == null -> ""
+                    portClass == "ArgPortInput" -> ", requires = Optional.present(${plan.constraints}.map { it.requires() })"
+                    else -> ", provides = Optional.present(${plan.constraints}.map { it.provides() })"
+                }
+        val base =
+                "key = ${key.literal()}, description = ${optional(description)}, " +
+                        "nullable = Optional.present($nullable)$constrained"
+        return when (val kind = plan.kind) {
             is Kind.Scalar -> "$portClass(kind = PortKind.${kind.port}, $base)"
             is Kind.Struct ->
                     "$portClass(kind = PortKind.STRUCTURE, identifier = Optional.present(${kind.qualified}.identifier), $base)"
             is Kind.ListOf -> {
                 // A list has one child, keyed "..." as the other SDKs key it.
-                val child = port(portClass, "...", kind.item, kind.item.isMarkedNullable, null, at)
+                val child = port(portClass, "...", kind.item, kind.item.nullable, null)
                 "$portClass(kind = PortKind.LIST, children = Optional.present(listOf($child)), $base)"
             }
         }
     }
 
-    /** The expression that reads a value of [type] from the JSON element [element]. */
-    private fun decode(type: KSType, element: String, at: KSNode): String =
-            when (val kind = kind(type, at)) {
+    /**
+     * The expression that reads a (non-null) value from the JSON element [element]. A structure
+     * whose port states constraints is tested against them once it is expanded.
+     */
+    private fun decode(plan: Plan, element: String, portKey: String): String =
+            when (val kind = plan.kind) {
                 is Kind.Scalar -> "live.arkitekt.Wire.${kind.reader}($element)"
-                is Kind.Struct -> "live.arkitekt.Wire.expand(${kind.qualified}, context, $element)"
+                is Kind.Struct -> {
+                    val expand = "live.arkitekt.Wire.expand(${kind.qualified}, context, $element)"
+                    if (plan.constraints == null) expand
+                    else "$expand.also { expanded -> live.arkitekt.Wire.check(${kind.qualified}, context, expanded, " +
+                            "${plan.constraints}, \"requires\", ${portKey.literal()}) }"
+                }
                 is Kind.ListOf -> {
-                    val item = kind.item
-                    val inner = decode(item.makeNotNullable(), "item", at)
-                    if (item.isMarkedNullable)
+                    val inner = decode(kind.item, "item", portKey)
+                    if (kind.item.nullable)
                             "live.arkitekt.Wire.list($element) { item -> if (item is kotlinx.serialization.json.JsonNull) null else $inner }"
                     else "live.arkitekt.Wire.list($element) { item -> $inner }"
                 }
             }
 
-    /** The expression that writes [value] of [type] as a JSON element. */
-    private fun encode(type: KSType, value: String, at: KSNode): String =
-            when (val kind = kind(type, at)) {
+    /**
+     * The expression that writes the (non-null) [value] as a JSON element. A structure whose
+     * port states constraints is tested against them before it is shrunk.
+     */
+    private fun encode(plan: Plan, value: String, portKey: String): String =
+            when (val kind = plan.kind) {
                 is Kind.Scalar -> "live.arkitekt.Wire.json($value)"
-                is Kind.Struct -> "live.arkitekt.Wire.shrink(${kind.qualified}, $value)"
+                is Kind.Struct -> {
+                    val checked =
+                            if (plan.constraints == null) value
+                            else "$value.also { shrunk -> live.arkitekt.Wire.check(${kind.qualified}, context, shrunk, " +
+                                    "${plan.constraints}, \"provides\", ${portKey.literal()}) }"
+                    "live.arkitekt.Wire.shrink(${kind.qualified}, $checked)"
+                }
                 is Kind.ListOf -> {
-                    val item = kind.item
-                    val inner = encode(item.makeNotNullable(), "item", at)
-                    if (item.isMarkedNullable)
+                    val inner = encode(kind.item, "item", portKey)
+                    if (kind.item.nullable)
                             "kotlinx.serialization.json.JsonArray($value.map { item -> if (item == null) kotlinx.serialization.json.JsonNull else $inner })"
                     else "kotlinx.serialization.json.JsonArray($value.map { item -> $inner })"
                 }
