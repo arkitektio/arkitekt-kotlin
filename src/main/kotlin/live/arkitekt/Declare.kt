@@ -88,10 +88,13 @@ interface Structure<T> {
 
     /**
      * The descriptors of a value: what a port's [Requires] and [Provides] are tested against
-     * when the value crosses it. A key left out is not tested. Nothing by default, so nothing
-     * is tested; called only for a port that states a constraint.
+     * when the value crosses it. A key left out is not tested; nothing by default.
+     *
+     * Neither suspending nor handed the [Context], on purpose: describing never asks a server.
+     * The descriptors are fetched with the object when it is expanded ([expand] selects them)
+     * and read off the value here. A second round trip to describe is an antipattern.
      */
-    suspend fun describe(context: Context, value: T): Map<String, JsonElement> = emptyMap()
+    fun describe(value: T): Map<String, JsonElement> = emptyMap()
 }
 
 /** A [Structure] that is its id and nothing more: nothing is fetched to expand it. */
@@ -165,15 +168,14 @@ object Wire {
      *
      * @throws IllegalArgumentException naming the constraints the value breaks: the task fails.
      */
-    suspend fun <T> check(
+    fun <T> check(
             structure: Structure<T>,
-            context: Context,
             value: T,
             constraints: List<Constraint>,
             side: String,
             port: String
     ) {
-        val described = structure.describe(context, value)
+        val described = structure.describe(value)
         if (described.isEmpty()) return
         val broken = Descriptors.unfulfilled(constraints, described)
         if (broken.isNotEmpty()) {

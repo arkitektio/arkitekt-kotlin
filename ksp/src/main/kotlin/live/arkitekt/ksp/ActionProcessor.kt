@@ -362,7 +362,7 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
                 is Kind.Struct -> {
                     val expand = "live.arkitekt.Wire.expand(${kind.qualified}, context, $element)"
                     if (plan.constraints == null) expand
-                    else "$expand.also { expanded -> live.arkitekt.Wire.check(${kind.qualified}, context, expanded, " +
+                    else "$expand.also { expanded -> live.arkitekt.Wire.check(${kind.qualified}, expanded, " +
                             "${plan.constraints}, \"requires\", ${portKey.literal()}) }"
                 }
                 is Kind.ListOf -> {
@@ -383,7 +383,7 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
                 is Kind.Struct -> {
                     val checked =
                             if (plan.constraints == null) value
-                            else "$value.also { shrunk -> live.arkitekt.Wire.check(${kind.qualified}, context, shrunk, " +
+                            else "$value.also { shrunk -> live.arkitekt.Wire.check(${kind.qualified}, shrunk, " +
                                     "${plan.constraints}, \"provides\", ${portKey.literal()}) }"
                     "live.arkitekt.Wire.shrink(${kind.qualified}, $checked)"
                 }

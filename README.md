@@ -93,6 +93,10 @@ argument after it is expanded, a return before it is shrunk. One that does not f
 task, naming the constraint and the actual value. A key `describe` does not return is not
 tested, and `describe` is only called for a port that states a constraint.
 
+`describe` reads what the value already holds; it cannot ask a server (it is not suspending
+and gets no context). Fetch the descriptors with the object, in the query `expand` makes: a
+second round trip to describe an object is an antipattern, and doubles every constrained call.
+
 A function the processor cannot make an action of fails the build, at the function, saying why.
 An action can still be declared by hand with `App.action(key, name, …) { context, args -> … }`.
 

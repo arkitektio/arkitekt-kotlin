@@ -58,7 +58,7 @@ class Box(val size: Int) {
         override val identifier = "@test/box"
         override suspend fun expand(context: Context, id: String) = Box(id.toInt())
         override fun shrink(value: Box) = value.size.toString()
-        override suspend fun describe(context: Context, value: Box): Map<String, JsonElement> =
+        override fun describe(value: Box): Map<String, JsonElement> =
                 mapOf(SIZE to JsonPrimitive(value.size))
     }
 }
