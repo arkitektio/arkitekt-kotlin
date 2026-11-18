@@ -49,7 +49,11 @@ class AgentIntegrationTest {
 
         val alias = localAlias(started.port)
         val tokens = fixedTokenManager(RekuestStack.TOKEN)
-        val app = App("kotlin-integration", "0.1.0").actions(AddAction, SlowEchoAction)
+        val app =
+                App("kotlin-integration", "0.1.0")
+                        .state(CounterState, Counter())
+                        .actions(AddAction, SlowEchoAction, BumpAction)
+                        .blok("counter_panel", COUNTER_PANEL, description = "How often it counted")
         val agent = Agent(alias, tokens, app, Context(Unlok(alias, tokens), Rekuest(alias, tokens), tokens))
 
         runBlocking {
@@ -80,6 +84,28 @@ class AgentIntegrationTest {
         val done = finished(task)
         assertEquals("COMPLETED", done["latestEventKind"]!!.jsonPrimitive.content)
         assertEquals(5, done["latestReturns"]!!.jsonObject["return0"]!!.jsonPrimitive.int)
+    }
+
+    @Test
+    fun `a state, the action that changes it and a blok sent as its source are the server's to show`() {
+        // The blok went as its BSX source alone. The server read off it that it shows this agent's
+        // Counter and calls its bump, and mapped it to the agent: nothing is left unbound.
+        val agent =
+                graphql(
+                        """query(${'$'}id: ID!) { agent(id: ${'$'}id) { states { interface } agentMappings { key materializedBlok { name unboundDependencies } } } }""",
+                        buildJsonObject { put("id", agentId) }
+                ).jsonObject["agent"]!!.jsonObject
+        assertEquals(listOf("Counter"), agent["states"]!!.jsonArray.map { it.jsonObject["interface"]!!.jsonPrimitive.content })
+        val mapping = agent["agentMappings"]!!.jsonArray.single().jsonObject
+        assertEquals("self", mapping["key"]!!.jsonPrimitive.content)
+        assertEquals("counter_panel", mapping["materializedBlok"]!!.jsonObject["name"]!!.jsonPrimitive.content)
+        assertEquals(0, mapping["materializedBlok"]!!.jsonObject["unboundDependencies"]!!.jsonArray.size)
+
+        // A stateful action is assigned to a named agent (this test always names it), and its
+        // change of the state is taken by the server: the task completes with the new count.
+        val done = finished(assign("bump", buildJsonObject {}))
+        assertEquals("COMPLETED", done["latestEventKind"]!!.jsonPrimitive.content, "events: ${done["events"]}")
+        assertEquals(1, done["latestReturns"]!!.jsonObject["return0"]!!.jsonPrimitive.int)
     }
 
     @Test

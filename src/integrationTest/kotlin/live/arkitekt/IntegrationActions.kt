@@ -20,3 +20,26 @@ suspend fun slowEcho(text: String): String {
     delay(6000)
     return text
 }
+
+/**
+ * How often [bump] ran.
+ *
+ * @property count The runs so far
+ */
+@State
+data class Counter(val count: Int = 0)
+
+/** Count one up, and say where the count is. */
+@Action
+suspend fun bump(counter: StateMut<Counter>, task: Task): Int {
+    task.progress(50, "counting")
+    return counter.update { it.copy(count = it.count + 1) }.count
+}
+
+/** The app's panel: its source is all the app says of it, and the server reads the rest off it. */
+const val COUNTER_PANEL = """<Blok kind="agent" context="panel">
+  <Card>
+    <Text>{self.Counter.count}</Text>
+    <Button onClick={self.bump()}>Count</Button>
+  </Card>
+</Blok>"""

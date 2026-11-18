@@ -202,7 +202,7 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
                         ?: emptyList()
         val locks =
                 if (ownLocks.isEmpty() && states.isEmpty()) null
-                else (listOf("listOf(${ownLocks.joinToString(", ") { it.literal() }})") + states.map { "$it.locks" })
+                else (listOf("listOf<String>(${ownLocks.joinToString(", ") { it.literal() }})") + states.map { "$it.locks" })
                         .joinToString(" + ", prefix = "(", postfix = ").distinct()")
 
         val objectName = functionName.replaceFirstChar { it.uppercase() } + "Action"
