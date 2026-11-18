@@ -113,11 +113,17 @@ class Ports {
  * Declared once, beside its client, and handed to [App.service]; a handler gets the client back
  * with `context[service]`. Services are built in the order an app declares them, so one may
  * build on another (`scope[other]`).
+ *
+ * [scopes] is what an app using the client has to be allowed to do at the service: what the
+ * server's schema asks for (`@auth(required_scopes: …)`) on every root field the client's
+ * operations select. An app that declares the service asks for them at login; without them the
+ * token it gets is refused by those operations.
  */
 class Service<T : Any>(
         val key: String,
         val service: String,
         val optional: Boolean = false,
+        val scopes: List<String> = emptyList(),
         val build: (ServiceScope) -> T
 )
 
@@ -189,8 +195,11 @@ class App(val identifier: String, val version: String) {
     var description: String? = null
         private set
 
-    /** What the login asks for. */
-    val scopes: MutableList<String> = mutableListOf("openid")
+    /**
+     * What the login asks for: `openid`, what being an agent takes at rekuest, and what the
+     * clients of the app's services need ([Service.scopes]). [scope] asks for more.
+     */
+    val scopes: MutableList<String> = (listOf("openid") + REKUEST_SCOPES).toMutableList()
 
     /** The services the app needs. Every app needs rekuest: it is what assigns its actions. */
     val requirements: MutableList<Requirement> =
@@ -217,6 +226,15 @@ class App(val identifier: String, val version: String) {
     fun <T : Any> service(service: Service<T>): App = apply {
         requires(service.key, service.service, service.optional)
         services += service
+        scopes(service.scopes)
+    }
+
+    /** Ask for more at login than the app's services' clients need: for what no client says. */
+    fun scope(vararg more: String): App = scopes(more.asList())
+
+    /** The same, for a list a client carries (`Unlok.SCOPES`). */
+    fun scopes(more: Collection<String>): App = apply {
+        for (scope in more) if (scope !in scopes) scopes += scope
     }
 
     /** Need a service without a client of its own. The login fails without it, unless optional. */
@@ -373,5 +391,12 @@ class App(val identifier: String, val version: String) {
     companion object {
         /** The key every app's login names rekuest by. */
         const val REKUEST = "rekuest"
+
+        /**
+         * What every app needs at rekuest: to act as an agent (register its actions, states
+         * and bloks, and receive tasks). It is what the schema asks for on the operations in
+         * `src/main/graphql/rekuest`; `ScopesTest` holds the two together.
+         */
+        val REKUEST_SCOPES: List<String> = listOf("rekuest_agent")
     }
 }

@@ -72,6 +72,15 @@ class Unlok(alias: Alias, tokens: TokenManager) {
     suspend fun getUser(): MeQuery.Data =
             getClient().query(MeQuery()).execute().data
                     ?: throw Exception("Failed to retrieve user data")
+
+    companion object {
+        /**
+         * What an app that asks lok who is logged in ([getUser]) needs there. Every app is
+         * handed this client, but only one that uses it asks for the scope:
+         * `App(…).scopes(Unlok.SCOPES)`.
+         */
+        val SCOPES: List<String> = listOf("lok_read")
+    }
 }
 
 /** Rekuest: where an app's actions are registered and assigned. */

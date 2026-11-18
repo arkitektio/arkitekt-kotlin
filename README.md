@@ -194,7 +194,9 @@ literal, not as a string built at run time.
 A service is declared once, beside its client, and an app asks for it:
 
 ```kotlin
-val mikro = Service("mikro", "live.arkitekt.mikro") { Mikro(it.alias, it.tokens) }
+val mikro = Service("mikro", "live.arkitekt.mikro", scopes = listOf("mikro_read", "mikro_write")) {
+    Mikro(it.alias, it.tokens)
+}
 
 val app = App("my-app", "0.1.0").service(mikro)
 // in a handler: context[mikro]
@@ -202,6 +204,20 @@ val app = App("my-app", "0.1.0").service(mikro)
 
 Services are built in the order they are declared, so one can build on another (`it[mikro]`).
 Rekuest is required by every app and needs no declaration.
+
+### Scopes
+
+The login asks for what the app will do, and gets a token that may do exactly that. A service
+says what its client needs (`scopes`): the scopes the server's schema asks for
+(`@auth(required_scopes: […])`) on every root field the client's operations select. An app that
+declares the service asks for them, beside `openid` and `rekuest_agent`, which every app needs
+to register and be assigned work. `App(…).scope("…")` asks for more; an app that asks lok who is
+logged in (`context.unlok.getUser()`) adds `.scopes(Unlok.SCOPES)`.
+
+A scope that is not asked for is not in the token, and the operation that needs it is refused
+at run time. Hold the list to the schema with a test, as `ScopesTest` does for this library's
+own operations (`requiredScopes(folder)` reads a folder of `*.graphqls` and `*.graphql`). A
+login that was kept from before a scope was added has to be made again.
 
 ## Build
 
