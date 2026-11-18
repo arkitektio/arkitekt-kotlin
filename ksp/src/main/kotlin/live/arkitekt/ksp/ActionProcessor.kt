@@ -88,6 +88,8 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
 
         // Parameters: a port each, unless injected.
         val ports = mutableListOf<String>()
+        // The argument keys, which no return key may repeat: the server refuses that.
+        val argKeys = mutableSetOf<String>()
         val fixed = mutableListOf<Pair<String, String>>() // parameter name -> expression
         val defaulted = mutableListOf<Pair<String, String>>() // parameter name -> port key
         val decoders = mutableMapOf<String, String>()
@@ -122,6 +124,7 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
             val plan = plan(parameter.type.resolve(), parameter.annotations.toList(), REQUIRES, fields, parameter)
             val nullable = plan.nullable || parameter.hasDefault
             ports += port("ArgPortInput", parameterName, plan, nullable, doc.params[parameterName])
+            argKeys += parameterName
             val decode = decode(plan, "it", parameterName)
             when {
                 parameter.hasDefault -> {
@@ -150,6 +153,15 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
         val returnKey = returns?.string("key")?.ifEmpty { null } ?: "return0"
         val returnDescription = returns?.string("description")?.ifEmpty { null } ?: doc.returns
         val isUnit = unalias(returned).type.declaration.qualifiedName?.asString() == "kotlin.Unit"
+        if (!isUnit && returnKey in argKeys) {
+            // rekuest refuses an action whose args and returns share a key: a dependency path
+            // (`args.x` / `returns.x`) could not tell them apart. Caught here, not at login.
+            throw Refused(
+                    "the return key \"$returnKey\" is also an argument: name the return otherwise " +
+                            "with @Returns(\"…\")",
+                    returns ?: function
+            )
+        }
         val returnPlan =
                 if (isUnit) null
                 else plan(returned, function.annotations.toList(), PROVIDES, fields, function)
