@@ -5,6 +5,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -242,6 +245,51 @@ class AgentLifecycleTest {
         assertEquals(1, types.count { it == "COMPLETED" })
         // Both deliveries are acknowledged: the server forgets the command either way.
         assertEquals(2, gw.received.count { it.contains("\"COMMAND_ACK\"") && it.contains("\"through\":1") })
+    }
+
+    @Test
+    fun `a task says its locks, its progress and what it changed, after the baseline of the states`() = runBlocking {
+        // `StagePositionState` and `MoveToAction` are the processor's (DeclaredStateTest.kt).
+        val app = App("test", "0.1.0").state(StagePositionState, StagePosition()).action(MoveToAction)
+        val assign = """{"type":"ASSIGN","id":"a1","interface":"move_to","task":"t-1","args":{"x":1.5,"y":2.0},
+            "user":"1","org":"1","action":"a","implementation":"i","pos":1}"""
+        val gw = FakeGateway { _, session ->
+            with(session) {
+                sendJson(init(readUntil { it.contains("REGISTER") }))
+                sendJson(assign)
+                // Given back last: locks are taken in sorted order and released in reverse.
+                readUntil { it.contains("\"UNLOCK\"") && it.contains("\"motor\"") }
+                sendJson("""{"type":"KICK","id":"k1"}""")
+                drain()
+            }
+        }
+        val agent = agentAgainst(gw, app)
+        withTimeout(30_000) { agent.provideForever() }
+
+        val reports =
+                gw.received.map { agentJson.parseToJsonElement(it).jsonObject }.filter { it["pos"] != null }
+        fun text(report: JsonObject, key: String) = report[key]?.jsonPrimitive?.content
+        assertEquals(
+                listOf(
+                        "SESSION_INIT", "LOCK", "LOCK", "STARTED", "PROGRESS", "STATE_PATCH", "STATE_PATCH",
+                        "STATE_PATCH", "YIELD", "COMPLETED", "UNLOCK", "UNLOCK"
+                ),
+                reports.map { text(it, "type") }
+        )
+        // The baseline: every state as it was before anything changed it.
+        assertEquals(
+                agentJson.parseToJsonElement("""{"StagePosition":{"x":0.0,"y":0.0,"visited":[],"label":null}}"""),
+                reports[0]["states"]
+        )
+        assertEquals(listOf("motor", "stage"), reports.filter { text(it, "type") == "LOCK" }.map { text(it, "key") })
+        assertEquals(listOf("stage", "motor"), reports.filter { text(it, "type") == "UNLOCK" }.map { text(it, "key") })
+        // One operation per field that changed, each with the next revision, naming the task.
+        val patches = reports.filter { text(it, "type") == "STATE_PATCH" }
+        assertEquals(listOf("/x", "/y", "/visited/0"), patches.map { text(it, "path") })
+        assertEquals(listOf("replace", "replace", "add"), patches.map { text(it, "op") })
+        assertEquals(listOf("1", "2", "3"), patches.map { text(it, "global_rev") })
+        assertEquals(setOf("t-1"), patches.map { text(it, "task_id") }.toSet())
+        assertEquals(setOf("StagePosition"), patches.map { text(it, "state_name") }.toSet())
     }
 
     // ---- Close-code policy, end to end -------------------------------------------------------

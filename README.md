@@ -53,6 +53,9 @@ Nothing is looked up by reflection at run time.
   name in snake case otherwise. **`@Returns("key")`** names the return (`return0` otherwise).
 - **`@Inject`** marks a parameter the app fills instead of the caller, found by its type: the
   `Context`, a declared service's client, or what the app provides with `App.provide(…)`.
+- A **`Task`** parameter is the running task: `task.progress(50, "half way")` and
+  `task.log("…")` tell whoever watches how far it is. A handler written by hand asks for
+  `Task.current()`.
 
 A structure travels by id, under an identifier:
 
@@ -100,6 +103,76 @@ second round trip to describe an object is an antipattern, and doubles every con
 A function the processor cannot make an action of fails the build, at the function, saying why.
 An action can still be declared by hand with `App.action(key, name, …) { context, args -> … }`.
 
+## States
+
+An app can hold state: what a piece of hardware, or a host such as Fiji, is doing right now.
+`@State` on a data class makes it one, as `@app.state` does in Python and `#[derive(State)]` in
+Rust. The processor writes `<Class>State` beside it.
+
+```kotlin
+/**
+ * Where the stage is.
+ *
+ * @property x Microns from the origin, along x
+ */
+@State(locks = ["stage"])
+data class StagePosition(val x: Double = 0.0, val y: Double = 0.0)
+
+@Action
+suspend fun moveTo(x: Double, y: Double, stage: StateMut<StagePosition>, task: Task): Double {
+    task.progress(50, "moving")
+    stage.update { it.copy(x = x, y = y) }
+    return x
+}
+
+val app = App("stage", "0.1.0")
+    .state(StagePositionState, StagePosition())
+    .action(MoveToAction)
+```
+
+- **Fields** are the properties of the primary constructor: `String`, `Int`/`Long`,
+  `Float`/`Double`, `Boolean`, and a `List` of those. A nullable type is a nullable field. A
+  field is described with `@property` in the class's KDoc, or by KDoc on the property.
+- **Changes are published.** `update` takes the value and returns the next one. What differs
+  goes out as JSON Patch operations (one `STATE_PATCH` each), so whoever watches the app knows
+  its state. Do not write actions that only read a state back; reading is what watching is for.
+  A `StateRef<T>` parameter is for an action that needs to consult a state while doing its work.
+- **Locks.** `locks` on a state means a task must hold them to change it. An action that takes
+  the state as a `StateMut` holds them without saying so, and `@Action(locks = ["motor"])`
+  names further ones. Two tasks that need the same lock run one after the other.
+- **Outside a task**, `connection.state(StagePositionState)` (or `context.state(…)` in a
+  provider) gives a handle a listener can write to. It can only change a state without locks.
+
+## Bloks
+
+An app can ship its own UI: a blok, written in BSX, that reads the app's states and calls its
+actions.
+
+```kotlin
+const val STAGE_PANEL = """<Blok kind="agent" context="panel">
+  <Card>
+    <Text>{self.StagePosition.x}</Text>
+    <Button onClick={self.move_to(x: 0, y: 0)}>Home</Button>
+  </Card>
+</Blok>"""
+
+val app = App("stage", "0.1.0")
+    .state(StagePositionState, StagePosition())
+    .action(MoveToAction)
+    .blok("panel", STAGE_PANEL, description = "Where the stage is")
+```
+
+The source is all the app says. The `<Blok>` element names what the blok is (`kind`) and what
+draws it (`context`: `panel`, `scene` or `logo`); `self.<State>.<field>` reads a state and
+`self.<action>(…)` calls an action, by its key. Nothing in this library parses BSX: the rekuest
+server does, and works out from the source which states and actions the blok depends on.
+
+A source that does not parse, or that reads a state or calls an action the app does not declare,
+is refused: `Runtime.connect` throws, with the server's finding. `args = { arg("lens",
+PortKind.STRUCTURE, identifier = "@mikro/lens") }` declares the items a blok is opened for (read
+as `args.<key>`), and `default = true` makes it what a UI opens first. Write the source as a
+literal, not as a string built at run time.
+
 ## What is in it
 
 | | |
@@ -107,6 +180,9 @@ An action can still be declared by hand with `App.action(key, name, …) { conte
 | `App`, `Ports` | What an app is: its identifier and version, the services it needs, its actions and their ports |
 | `@Action`, `@Inject`, `@Returns`, `Structure` | Actions written as plain functions, and the processor (`arkitekt-kotlin-ksp`) that reads them |
 | `@Requires`, `@Provides`, `Descriptors` | What a port requires of a structure and says of one it returns, declared and tested |
+| `@State`, `StateMut`, `StateRef` | State an app holds, published as it changes; the locks it is changed under |
+| `Task` | The running task, for an action: progress, logs, the app's states |
+| `App.blok` | UI the app ships, as its BSX source |
 | `Service`, `Context` | A service an app asks for and how its client is built; a handler gets clients with `context[service]` |
 | `Runtime`, `Connection` | Logs an app in, builds its `Context`, registers and serves its actions |
 | `FaktsClient`, `TokenManager`, `FaktsCache` | The login: discovery, the OAuth2 device-code grant, token rotation, the kept login |
@@ -159,6 +235,13 @@ dependencies {
 
 ## Not here yet
 
-States, locks, child calls and workflows; several returns, enums, dictionaries and dates as
-ports, and reporting progress from inside an action; registering over the socket (`REGISTER` carries no
-declaration, actions are registered with `implementAgent`); a journal that survives a restart.
+Child calls and workflows; several returns, enums, dictionaries and dates as ports; registering
+over the socket (`REGISTER` carries no declaration: actions, states, locks and bloks are
+registered with `implementAgent`); a journal that survives a restart.
+
+Of states: a state that is kept across restarts, structures as fields, hooks that run at startup
+or in the background, and requirements on a state when a task is assigned. Of bloks: an action's
+own bloks (its logo, what it asks a person) and the files a blok names (`self.assets`).
+
+A blok that names a state or an action needs rekuest-server 21.4 or newer, which works out a
+blok's dependencies from its source. An older server registers the blok without them.

@@ -56,6 +56,13 @@ class Journal(val session: String = UUID.randomUUID().toString()) {
         synchronized(this) {
             val task = event.reportedTask
             var step: Long? = null
+            // A lock or a state change a running task made is one of its steps too.
+            event.concernedTask?.let { concerned ->
+                steps[concerned]?.let {
+                    step = it + 1
+                    steps[concerned] = it + 1
+                }
+            }
             if (task != null) {
                 if (task in ended) return false
                 // Only a task that ran here has steps: a report on another one carries none.

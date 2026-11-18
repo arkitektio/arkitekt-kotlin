@@ -1,11 +1,11 @@
 package live.arkitekt
 
+import com.apollographql.apollo.api.ApolloResponse
+import com.apollographql.apollo.api.Operation
 import com.apollographql.apollo.api.Optional
 import live.arkitekt.rekuest.graphql.EnsureAgentMutation
 import live.arkitekt.rekuest.graphql.ImplementAgentMutation
 import live.arkitekt.rekuest.graphql.type.AgentInput
-import live.arkitekt.rekuest.graphql.type.ImplementAgentInput
-import live.arkitekt.rekuest.graphql.type.ImplementationInput
 import io.ktor.client.*
 import io.ktor.client.plugins.websocket.*
 import io.ktor.client.request.*
@@ -44,32 +44,42 @@ public class Agent(
         private val budgetResetAfterSeconds: Double = 30.0
 ) {
 
+    init {
+        // The app's states, each at its initial value (a Runtime has put them there already).
+        context.states.adopt(app.states.values)
+    }
+
+    /** What the server answered, or why it did not take the request. */
+    private fun <D : Operation.Data> ApolloResponse<D>.accepted(what: String): D {
+        exception?.let { throw IllegalStateException("$what failed: ${it.message}", it) }
+        val refused = errors.orEmpty()
+        if (refused.isNotEmpty()) {
+            throw IllegalStateException("$what was refused: ${refused.joinToString("; ") { it.message }}")
+        }
+        return data ?: throw IllegalStateException("$what answered nothing")
+    }
+
     // Register (or look up) the agent record. The agent is identified by the token + name;
     // there is no instanceId in the current protocol.
     suspend fun createAgent(name: String): Result<Unit> {
         return kotlin.runCatching {
             val request = EnsureAgentMutation(AgentInput(name = Optional.present(name)))
-            context.rekuest.getClient().mutation(request).execute().data
+            context.rekuest.getClient().mutation(request).execute().accepted("ensureAgent")
+            Unit
         }
     }
 
-    // Advertise all registered implementations to the server in a single implementAgent call.
+    /**
+     * Register everything the app declares in one `implementAgent` call: its actions, states,
+     * locks and bloks ([App.declaration]). All of it lands or none of it.
+     *
+     * @throws IllegalStateException with the server's words when it refuses the declaration: a
+     *   blok that does not parse or reads a state the app does not declare, a port it cannot take.
+     */
     suspend fun registerFunctions() {
-        val implementations =
-                app.actions.values.map { action ->
-                    ImplementationInput(
-                            definition = action.definition,
-                            `interface` = action.key
-                    )
-                }
-
-        val mutation =
-                ImplementAgentMutation(
-                        ImplementAgentInput(implementations = Optional.present(implementations))
-                )
-
-        val response = context.rekuest.getClient().mutation(mutation).execute()
-        println("implementAgent -> ${response.data}")
+        val response = context.rekuest.getClient().mutation(ImplementAgentMutation(app.declaration())).execute()
+        val registered = response.accepted("implementAgent").implementAgent
+        println("Registered as agent ${registered.id}")
     }
 
     // What belongs to the process, not to one socket: a task keeps running while the connection
@@ -91,6 +101,53 @@ public class Agent(
     @Volatile private var direct: (suspend (AgentEvent) -> Unit)? = null
 
     private var sessionAnnounced = false
+
+    /** Who holds which lock. */
+    private val locks = Locks().also { held -> context.states.holds = held::holds }
+
+    /** The app's changes so far, across all its states. Counted under the states' lock. */
+    private var globalRev = 0L
+
+    /** What a running handler's [Task] reports through. */
+    private val host =
+            object : TaskHost {
+                override val states: States get() = context.states
+                override suspend fun report(event: AgentEvent) = this@Agent.report(event)
+            }
+
+    /**
+     * Say a change to a state: a STATE_PATCH per operation, each with the next revision, and
+     * every [SNAPSHOT_INTERVAL] revisions the states as a whole. Called under the states' lock,
+     * so revisions and journal positions run in the same order.
+     */
+    private fun publish(state: String, ops: List<PatchOp>, task: String?) {
+        val ts = System.currentTimeMillis() / 1000.0
+        var snapshot = false
+        for (op in ops) {
+            globalRev += 1
+            if (globalRev % SNAPSHOT_INTERVAL == 0L) snapshot = true
+            journal.record(
+                    AgentEvent.StatePatch(
+                            sessionId = journal.session,
+                            globalRev = globalRev,
+                            stateName = state,
+                            ts = ts,
+                            op = op.op,
+                            path = op.path,
+                            value = op.value,
+                            taskId = task
+                    )
+            )
+        }
+        if (snapshot) {
+            journal.record(AgentEvent.StateSnapshot(journal.session, globalRev, context.states.snapshots()))
+        }
+    }
+
+    /** A lock taken or given back. A probe's is not said. */
+    private fun said(event: AgentEvent, task: String) {
+        if (!isProbe(task)) journal.record(event)
+    }
 
     /** A probe is ephemeral: its task id is `p-…` and its reports are sent at most once. */
     private fun isProbe(task: String) = task.startsWith("p-")
@@ -116,17 +173,23 @@ public class Agent(
             println("Ignoring duplicate ASSIGN for task ${msg.task}")
             return
         }
-        val func = app.actions[msg.functionName]?.handler
+        val action = app.actions[msg.functionName]
         val job =
                 tasks.launch(start = CoroutineStart.LAZY) {
+                    // The locks this task holds, as it takes them: given back however it ends.
+                    val taken = mutableListOf<String>()
                     try {
-                        if (func == null) {
+                        if (action == null) {
                             println("No implementation for interface '${msg.functionName}'")
                             report(AgentEvent.Critical(msg.task, "No implementation for '${msg.functionName}'"))
                             return@launch
                         }
+                        // Waits its turn here: a task that needs a lock another holds has not started.
+                        locks.take(msg.task, action.locks, taken) { said(AgentEvent.Lock(it, msg.task), msg.task) }
                         report(AgentEvent.Started(msg.task))
-                        val returns = func(context, msg.args)
+                        // The handler's Task travels in its coroutine: Task.current() finds it.
+                        val returns =
+                                withContext(TaskElement(Task(msg.task, host))) { action.handler(context, msg.args) }
                         report(AgentEvent.Yield(msg.task, returns))
                         report(AgentEvent.Completed(msg.task))
                     } catch (e: CancellationException) {
@@ -135,6 +198,10 @@ public class Agent(
                         report(AgentEvent.Critical(msg.task, e.message ?: e.toString()))
                     } finally {
                         running.remove(msg.task)
+                        // After the task's last report, and also when it was cancelled.
+                        withContext(NonCancellable) {
+                            locks.release(msg.task, taken) { said(AgentEvent.Unlock(it, msg.task), msg.task) }
+                        }
                     }
                 }
         running[msg.task] = job
@@ -196,9 +263,13 @@ public class Agent(
         // in-flight tasks, while a fresh one tells the backend the process died.
         val sessionId = journal.session
         // The journal's first report (position 1), once per process.
+        // It carries the states as they are now, and every change after it is published.
         if (!sessionAnnounced) {
             sessionAnnounced = true
-            journal.record(AgentEvent.SessionInit(sessionId = sessionId))
+            context.states.open(
+                    announce = { journal.record(AgentEvent.SessionInit(sessionId = sessionId, states = it)) },
+                    publish = ::publish
+            )
         }
 
         var retry = 0
@@ -263,6 +334,11 @@ public class Agent(
                 }
             }
         }
+    }
+
+    private companion object {
+        /** How many revisions pass between two snapshots of the states, as the other SDKs. */
+        const val SNAPSHOT_INTERVAL = 60L
     }
 
     /** One connection attempt, from opening the socket to it closing. */

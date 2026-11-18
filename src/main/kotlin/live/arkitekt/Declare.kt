@@ -46,13 +46,23 @@ import kotlinx.serialization.json.put
  *   Lens"). `@param` describes a port, `@return` the result.
  * - A parameter marked [Inject] is not a port: it is filled from the app (see [Context.inject]).
  *
+ * - A [Task] parameter is the running task (progress, logs); a [StateMut] or [StateRef]
+ *   parameter is one of the app's states. Neither is a port.
+ *
  * @param key what the server assigns the action by; the function's name in snake case if empty.
  * @param name what a person reads; overrides the KDoc.
  * @param description overrides the KDoc.
+ * @param locks the locks a task holds while it runs, beside those of the states it takes: two
+ *   tasks that name the same lock run one after the other.
  */
 @Target(AnnotationTarget.FUNCTION)
 @Retention(AnnotationRetention.SOURCE)
-annotation class Action(val key: String = "", val name: String = "", val description: String = "")
+annotation class Action(
+        val key: String = "",
+        val name: String = "",
+        val description: String = "",
+        val locks: Array<String> = []
+)
 
 /**
  * A parameter the app fills, not the caller: the [Context], a declared service's client, or

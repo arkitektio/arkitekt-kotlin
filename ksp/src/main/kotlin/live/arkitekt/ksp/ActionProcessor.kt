@@ -21,9 +21,9 @@ import com.google.devtools.ksp.symbol.Modifier
 private const val ACTION = "live.arkitekt.Action"
 private const val INJECT = "live.arkitekt.Inject"
 private const val RETURNS = "live.arkitekt.Returns"
-private const val STRUCTURE = "live.arkitekt.Structure"
-private const val REQUIRES = "live.arkitekt.Requires"
-private const val PROVIDES = "live.arkitekt.Provides"
+private const val TASK = "live.arkitekt.Task"
+private const val STATE_MUT = "live.arkitekt.StateMut"
+private const val STATE_REF = "live.arkitekt.StateRef"
 
 /** A parameter with a default value is tried in every present/absent combination: 2^n calls. */
 private const val MAX_DEFAULTS = 4
@@ -33,8 +33,6 @@ class ActionProcessorProvider : SymbolProcessorProvider {
             ActionProcessor(environment.codeGenerator, environment.logger)
 }
 
-/** Something about a function that cannot be an action, said at the place it is wrong. */
-private class Refused(message: String, val at: KSNode) : Exception(message)
 
 /**
  * Writes, for every top-level function marked `@Action`, an `object <Name>Action :
@@ -93,6 +91,9 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
         val fixed = mutableListOf<Pair<String, String>>() // parameter name -> expression
         val defaulted = mutableListOf<Pair<String, String>>() // parameter name -> port key
         val decoders = mutableMapOf<String, String>()
+        // The states the function takes (their generated declarations), and those it changes.
+        val states = mutableListOf<String>()
+        val manipulated = mutableListOf<String>()
         for (parameter in function.parameters) {
             val parameterName =
                     parameter.name?.asString() ?: throw Refused("a parameter without a name", parameter)
@@ -101,6 +102,22 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
                 val injected = unalias(parameter.type.resolve()).type
                 fixed += parameterName to "context.inject(${injected.className(parameter)}::class.java)"
                 continue
+            }
+            // What the running task hands over is no port either: its own handle, or a state.
+            val given = unalias(parameter.type.resolve()).type
+            when (val qualified = given.declaration.qualifiedName?.asString()) {
+                TASK -> {
+                    fixed += parameterName to "live.arkitekt.Task.current()"
+                    continue
+                }
+                STATE_MUT, STATE_REF -> {
+                    val state = stateOf(given, parameter)
+                    val handle = if (qualified == STATE_MUT) "state" else "stateRef"
+                    fixed += parameterName to "live.arkitekt.Task.current().$handle($state)"
+                    if (state !in states) states += state
+                    if (qualified == STATE_MUT && state !in manipulated) manipulated += state
+                    continue
+                }
             }
             val plan = plan(parameter.type.resolve(), parameter.annotations.toList(), REQUIRES, fields, parameter)
             val nullable = plan.nullable || parameter.hasDefault
@@ -178,6 +195,16 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
                     "val result = $invocation\n                    mapOf(${returnKey.literal()} to $encode)"
                 }
 
+        // The locks it runs under: its own, and those of the states it takes.
+        val ownLocks =
+                (annotation.arguments.firstOrNull { it.name?.asString() == "locks" }?.value as? List<*>)
+                        ?.filterIsInstance<String>()
+                        ?: emptyList()
+        val locks =
+                if (ownLocks.isEmpty() && states.isEmpty()) null
+                else (listOf("listOf(${ownLocks.joinToString(", ") { it.literal() }})") + states.map { "$it.locks" })
+                        .joinToString(" + ", prefix = "(", postfix = ").distinct()")
+
         val objectName = functionName.replaceFirstChar { it.uppercase() } + "Action"
         val packageName = function.packageName.asString()
         val file = function.containingFile
@@ -206,8 +233,13 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
             appendLine("                    description = ${optional(description)},")
             appendLine("                    args = Optional.present(listOf(${ports.joinToString(", ")})),")
             appendLine("                    returns = Optional.present(listOf(${returnPorts.joinToString(", ")})),")
-            appendLine("                    kind = ActionKind.FUNCTION")
+            appendLine("                    kind = ActionKind.FUNCTION" + if (states.isEmpty()) "" else ",")
+            if (states.isNotEmpty()) appendLine("                    stateful = Optional.present(true)")
             appendLine("                ),")
+            if (locks != null) appendLine("                locks = $locks,")
+            if (manipulated.isNotEmpty()) {
+                appendLine("                manipulates = listOf(${manipulated.joinToString(", ") { "$it.name" }}),")
+            }
             appendLine("                handler = { context, args ->")
             appendLine("                    $body")
             appendLine("                }")
@@ -223,199 +255,33 @@ class ActionProcessor(private val generator: CodeGenerator, private val logger: 
                 .use { it.write(source.toByteArray(Charsets.UTF_8)) }
     }
 
-    // ---- Types ------------------------------------------------------------------------------
-
-    private sealed class Kind {
-        data class Scalar(val port: String, val reader: String) : Kind()
-        data class ListOf(val item: Plan) : Kind()
-        data class Struct(val qualified: String) : Kind()
-    }
-
-    /** A type with its aliases followed: the type they name, and what they said on the way. */
-    private class Unaliased(val type: KSType, val nullable: Boolean, val markers: List<KSAnnotation>)
-
-    private fun unalias(type: KSType): Unaliased {
-        var current = type
-        var nullable = type.isMarkedNullable
-        val markers = mutableListOf<KSAnnotation>()
-        while (true) {
-            val alias = current.declaration as? KSTypeAlias ?: break
-            markers += alias.annotations
-            current = alias.type.resolve()
-            nullable = nullable || current.isMarkedNullable
-        }
-        return Unaliased(current.makeNotNullable(), nullable, markers)
-    }
-
     /**
-     * How one port (or a list's item) travels: its kind, whether it may be null, and the field
-     * holding its constraints, if it states any.
+     * The generated declaration of the state a `StateMut<T>` or `StateRef<T>` parameter names:
+     * `<T>State`, written by the state processor beside the `@State` class.
      */
-    private class Plan(val kind: Kind, val nullable: Boolean, val constraints: String?)
-
-    /**
-     * Plan the port of [type]. Its constraints are the [side]'s markers (`Requires` for an
-     * argument, `Provides` for a return) among [markers] (written at the use) and on the type
-     * aliases [type] goes through (written on a spec).
-     */
-    private fun plan(type: KSType, markers: List<KSAnnotation>, side: String, fields: MutableList<String>, at: KSNode): Plan {
-        val unaliased = unalias(type)
-        val constraints =
-                (markers + unaliased.markers)
-                        .filter { it.annotationType.resolve().declaration.qualifiedName?.asString() == side }
-                        .map { marker ->
-                            val operator = marker.arguments.first { it.name?.asString() == "operator" }.value
-                            "live.arkitekt.Constraint(${marker.string("key").literal()}, " +
-                                    "live.arkitekt.DescriptorOperator.${operator.toString().substringAfterLast('.')}, " +
-                                    "${(marker.arguments.firstOrNull { it.name?.asString() == "value" }?.value as? String ?: "true").literal()})"
-                        }
-        val field =
-                if (constraints.isEmpty()) null
-                else "constraints${fields.size}".also {
-                    fields += "private val $it = listOf(${constraints.joinToString(", ")})"
-                }
-        return Plan(kind(unaliased.type, side, fields, at), unaliased.nullable, field)
-    }
-
-    private fun kind(type: KSType, side: String, fields: MutableList<String>, at: KSNode): Kind {
-        val declaration = type.declaration
+    private fun stateOf(handle: KSType, at: KSNode): String {
+        val named =
+                handle.arguments.firstOrNull()?.type?.resolve()?.let { unalias(it).type }
+                        ?: throw Refused("a state handle names its state: StateMut<YourState>", at)
+        val declaration = named.declaration
         val qualified = declaration.qualifiedName?.asString() ?: throw Refused("a type without a name", at)
-        return when (qualified) {
-            "kotlin.String" -> Kind.Scalar("STRING", "string")
-            "kotlin.Long" -> Kind.Scalar("INT", "long")
-            "kotlin.Int" -> Kind.Scalar("INT", "int")
-            "kotlin.Double" -> Kind.Scalar("FLOAT", "double")
-            "kotlin.Float" -> Kind.Scalar("FLOAT", "float")
-            "kotlin.Boolean" -> Kind.Scalar("BOOL", "boolean")
-            "kotlin.collections.List" ->
-                    Kind.ListOf(
-                            plan(
-                                    type.arguments.firstOrNull()?.type?.resolve()
-                                            ?: throw Refused("a List without an item type", at),
-                                    emptyList(),
-                                    side,
-                                    fields,
-                                    at
-                            )
-                    )
-            else -> {
-                val companion =
-                        (declaration as? KSClassDeclaration)?.declarations
-                                ?.filterIsInstance<KSClassDeclaration>()
-                                ?.firstOrNull { it.isCompanionObject }
-                val isStructure =
-                        companion?.getAllSuperTypes()?.any {
-                            it.declaration.qualifiedName?.asString() == STRUCTURE
-                        } == true
-                if (!isStructure) {
-                    throw Refused(
-                            "$qualified cannot be a port. A port is a String, Int, Long, Float, Double, " +
-                                    "Boolean, a List of those, or a class whose companion object is a " +
-                                    "live.arkitekt.Structure. Mark the parameter @Inject if the app fills it.",
-                            at
-                    )
-                }
-                Kind.Struct(qualified)
-            }
+        if (declaration.annotation(STATE) == null) {
+            throw Refused("$qualified is no state: mark the class @State and declare it with App.state", at)
         }
+        return qualified + "State"
     }
-
-    private fun KSClassDeclaration.getAllSuperTypes(): Sequence<KSType> = sequence {
-        for (reference in superTypes) {
-            val resolved = reference.resolve()
-            yield(resolved)
-            (resolved.declaration as? KSClassDeclaration)?.let { yieldAll(it.getAllSuperTypes()) }
-        }
-    }
-
-    /** A port, as the constructor call of [portClass] (`ArgPortInput` or `ReturnPortInput`). */
-    private fun port(portClass: String, key: String, plan: Plan, nullable: Boolean, description: String?): String {
-        // An argument keeps what it requires, a return what it provides.
-        val constrained =
-                when {
-                    plan.constraints == null -> ""
-                    portClass == "ArgPortInput" -> ", requires = Optional.present(${plan.constraints}.map { it.requires() })"
-                    else -> ", provides = Optional.present(${plan.constraints}.map { it.provides() })"
-                }
-        val base =
-                "key = ${key.literal()}, description = ${optional(description)}, " +
-                        "nullable = Optional.present($nullable)$constrained"
-        return when (val kind = plan.kind) {
-            is Kind.Scalar -> "$portClass(kind = PortKind.${kind.port}, $base)"
-            is Kind.Struct ->
-                    "$portClass(kind = PortKind.STRUCTURE, identifier = Optional.present(${kind.qualified}.identifier), $base)"
-            is Kind.ListOf -> {
-                // A list has one child, keyed "..." as the other SDKs key it.
-                val child = port(portClass, "...", kind.item, kind.item.nullable, null)
-                "$portClass(kind = PortKind.LIST, children = Optional.present(listOf($child)), $base)"
-            }
-        }
-    }
-
-    /**
-     * The expression that reads a (non-null) value from the JSON element [element]. A structure
-     * whose port states constraints is tested against them once it is expanded.
-     */
-    private fun decode(plan: Plan, element: String, portKey: String): String =
-            when (val kind = plan.kind) {
-                is Kind.Scalar -> "live.arkitekt.Wire.${kind.reader}($element)"
-                is Kind.Struct -> {
-                    val expand = "live.arkitekt.Wire.expand(${kind.qualified}, context, $element)"
-                    if (plan.constraints == null) expand
-                    else "$expand.also { expanded -> live.arkitekt.Wire.check(${kind.qualified}, expanded, " +
-                            "${plan.constraints}, \"requires\", ${portKey.literal()}) }"
-                }
-                is Kind.ListOf -> {
-                    val inner = decode(kind.item, "item", portKey)
-                    if (kind.item.nullable)
-                            "live.arkitekt.Wire.list($element) { item -> if (item is kotlinx.serialization.json.JsonNull) null else $inner }"
-                    else "live.arkitekt.Wire.list($element) { item -> $inner }"
-                }
-            }
-
-    /**
-     * The expression that writes the (non-null) [value] as a JSON element. A structure whose
-     * port states constraints is tested against them before it is shrunk.
-     */
-    private fun encode(plan: Plan, value: String, portKey: String): String =
-            when (val kind = plan.kind) {
-                is Kind.Scalar -> "live.arkitekt.Wire.json($value)"
-                is Kind.Struct -> {
-                    val checked =
-                            if (plan.constraints == null) value
-                            else "$value.also { shrunk -> live.arkitekt.Wire.check(${kind.qualified}, shrunk, " +
-                                    "${plan.constraints}, \"provides\", ${portKey.literal()}) }"
-                    "live.arkitekt.Wire.shrink(${kind.qualified}, $checked)"
-                }
-                is Kind.ListOf -> {
-                    val inner = encode(kind.item, "item", portKey)
-                    if (kind.item.nullable)
-                            "kotlinx.serialization.json.JsonArray($value.map { item -> if (item == null) kotlinx.serialization.json.JsonNull else $inner })"
-                    else "kotlinx.serialization.json.JsonArray($value.map { item -> $inner })"
-                }
-            }
-
-    private fun KSType.className(at: KSNode): String {
-        if ((declaration as? KSClassDeclaration)?.classKind == ClassKind.ANNOTATION_CLASS) {
-            throw Refused("an annotation cannot be injected", at)
-        }
-        return declaration.qualifiedName?.asString() ?: throw Refused("a type without a name", at)
-    }
-
-    private fun optional(text: String?): String =
-            if (text.isNullOrBlank()) "Optional.absent()" else "Optional.present(${text.literal()})"
 }
 
 // ---- Annotations and names ------------------------------------------------------------------
 
-private fun KSAnnotated.annotation(qualified: String) =
+internal fun KSAnnotated.annotation(qualified: String) =
         annotations.firstOrNull {
             it.annotationType.resolve().declaration.qualifiedName?.asString() == qualified
         }
 
-private fun KSValueParameter.has(qualified: String) = annotation(qualified) != null
+internal fun KSValueParameter.has(qualified: String) = annotation(qualified) != null
 
-private fun com.google.devtools.ksp.symbol.KSAnnotation.string(name: String): String =
+internal fun com.google.devtools.ksp.symbol.KSAnnotation.string(name: String): String =
         arguments.firstOrNull { it.name?.asString() == name }?.value as? String ?: ""
 
 /** `showLens` → `show_lens`. */
@@ -475,7 +341,9 @@ internal class Doc(
                     close()
                     val parts = line.split(Regex("\\s+"), limit = 3)
                     when (parts[0]) {
-                        "@param" -> if (parts.size >= 2) current = parts[1] to StringBuilder(parts.getOrElse(2) { "" })
+                        // `@property` is how a class's KDoc names a field: a state's port.
+                        "@param", "@property" ->
+                                if (parts.size >= 2) current = parts[1] to StringBuilder(parts.getOrElse(2) { "" })
                         "@return", "@returns" ->
                                 current = "@return" to StringBuilder(line.substringAfter(parts[0]).trim())
                         else -> current = null // a tag that says nothing of the action

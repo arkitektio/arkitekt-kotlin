@@ -169,6 +169,9 @@ class Runtime(
                         services = built
                 )
 
+        // The app's states, each at its initial value: a provider may already hold one.
+        context.states.adopt(app.states.values)
+
         // What the app provides for injection, made now that the clients exist.
         app.providers.forEach { context.provided += it(context) }
 
@@ -181,7 +184,9 @@ class Runtime(
         fakts.report(session.endpoint, tokens.accessToken(), reports, functional = reports.values.all { it.valid })
 
         val agent = Agent(rekuestAlias, tokens, app, context)
-        agent.createAgent(app.identifier)
+        // A declaration the server refuses stops here, with its words: an agent that served
+        // on would be one nobody can assign to.
+        agent.createAgent(app.identifier).getOrThrow()
         agent.registerFunctions()
 
         return Connection(context, agent)
@@ -235,6 +240,12 @@ class Connection(val context: Context, private val agent: Agent) {
      * it for good (a success when it was kicked, a failure otherwise); cancel it to stop.
      */
     suspend fun serve(): Result<String> = agent.provideForever()
+
+    /**
+     * One of the app's states, to change from outside a task: what a host's listener writes
+     * what it sees to. Only a state that needs no lock ([Context.state]).
+     */
+    fun <T> state(declaration: StateDeclaration<T>): StateMut<T> = context.state(declaration)
 }
 
 /** Open [url] in the system browser, or print it when that cannot be done. */

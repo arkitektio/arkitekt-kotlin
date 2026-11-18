@@ -56,8 +56,32 @@ class AgentProtocolTest {
         val json = encode(AgentEvent.SessionInit(sessionId = "sess"))
         assertEquals(setOf("type", "session_id", "states", "id"), json.keys)
         assertEquals("SESSION_INIT", json["type"]?.jsonPrimitive?.content)
-        // `states` is required by the server even though we register none.
+        // `states` is required by the server, also for an app that holds none.
         assertEquals(JsonObject(emptyMap()), json["states"])
+    }
+
+    @Test
+    fun `STATE_PATCH carries the fields the other agents send`() {
+        // The key set of the STATE_PATCH in rekuest's recorded wire (`agent_wire.json`), without
+        // what the journal stamps on every report (pos, journal_session, agent_ts, task_step).
+        val json =
+                encode(
+                        AgentEvent.StatePatch(
+                                sessionId = "sess",
+                                globalRev = 1,
+                                stateName = "counter",
+                                ts = 1790000002.7,
+                                op = "replace",
+                                path = "/value",
+                                value = JsonPrimitive(1),
+                                taskId = "42"
+                        )
+                )
+        assertEquals(
+                setOf("type", "id", "session_id", "global_rev", "state_name", "ts", "op", "path", "value", "task_id"),
+                json.keys
+        )
+        assertEquals("STATE_PATCH", json["type"]?.jsonPrimitive?.content)
     }
 
     @Test

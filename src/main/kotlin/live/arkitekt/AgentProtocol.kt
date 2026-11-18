@@ -206,8 +206,8 @@ sealed class AgentEvent {
      * to the process, not the socket. Like any report it goes out after INIT and is sent again
      * until acknowledged.
      *
-     * `states` is the initial state snapshots by name. We register no states, so it is always
-     * empty — but the field is required, so it must still be written.
+     * `states` is every state the app holds, by name, as it is when the session is announced:
+     * the baseline the patches after it apply to. The field is required, also when empty.
      */
     @Serializable
     @SerialName("SESSION_INIT")
@@ -289,6 +289,44 @@ sealed class AgentEvent {
     @Serializable
     @SerialName("RESUMED")
     data class Resumed(val task: String, val id: String = newId()) : AgentEvent()
+
+    /**
+     * One change to a state: an RFC 6902 operation on its value. `globalRev` counts the changes
+     * of the whole app, across its states; `taskId` is the task that made the change, if one did.
+     */
+    @Serializable
+    @SerialName("STATE_PATCH")
+    data class StatePatch(
+            @SerialName("session_id") val sessionId: String,
+            @SerialName("global_rev") val globalRev: Long,
+            @SerialName("state_name") val stateName: String,
+            val ts: Double,
+            val op: String,
+            val path: String,
+            val value: JsonElement,
+            @SerialName("task_id") val taskId: String? = null,
+            val id: String = newId()
+    ) : AgentEvent()
+
+    /** Every state at a revision: said now and then, so a reader need not replay every patch. */
+    @Serializable
+    @SerialName("STATE_SNAPSHOT")
+    data class StateSnapshot(
+            @SerialName("session_id") val sessionId: String,
+            @SerialName("global_rev") val globalRev: Long,
+            val snapshots: Map<String, JsonElement>,
+            val id: String = newId()
+    ) : AgentEvent()
+
+    /** A task took a lock. */
+    @Serializable
+    @SerialName("LOCK")
+    data class Lock(val key: String, val task: String, val id: String = newId()) : AgentEvent()
+
+    /** A task gave a lock back. It comes after the task's last report. */
+    @Serializable
+    @SerialName("UNLOCK")
+    data class Unlock(val key: String, val task: String? = null, val id: String = newId()) : AgentEvent()
 }
 
 /** The task a report is about, for the reports the journal gates and numbers per task. */
@@ -305,6 +343,19 @@ internal val AgentEvent.reportedTask: String?
         is AgentEvent.Interrupted -> task
         is AgentEvent.Paused -> task
         is AgentEvent.Resumed -> task
+        else -> null
+    }
+
+/**
+ * The task a frame names without being a report of it: a lock taken or given back, a state
+ * changed. It is numbered among the task's steps while the task runs, and still recorded after
+ * the task ended (an UNLOCK follows the terminal report).
+ */
+internal val AgentEvent.concernedTask: String?
+    get() = when (this) {
+        is AgentEvent.StatePatch -> taskId
+        is AgentEvent.Lock -> task
+        is AgentEvent.Unlock -> task
         else -> null
     }
 
