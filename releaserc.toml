@@ -1,0 +1,14 @@
+# Releases: python-semantic-release reads the Conventional Commits since the last `vX.Y.Z`
+# tag, tags the next version and creates the GitHub release (the `release` job in
+# .github/workflows/ci.yml). The tag is the version: nothing in the repository carries it
+# (build.gradle.kts reads it as `-PlibraryVersion`), so nothing is committed back to the branch
+# and no changelog file is written. The notes are on the GitHub release.
+[semantic_release]
+tag_format = "v{version}"
+# Pre-1.0: a breaking change bumps the minor, not to 1.0.0.
+allow_zero_version = true
+major_on_zero = false
+build_command = ""
+
+[semantic_release.branches.main]
+match = "main"

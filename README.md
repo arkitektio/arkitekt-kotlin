@@ -233,6 +233,13 @@ dependencies {
 }
 ```
 
+## Releases
+
+A push to `main` that carries a `feat` or a `fix` ([Conventional Commits](https://www.conventionalcommits.org))
+is a release once the build and the integration test are green: semantic-release tags the next
+`vX.Y.Z` and writes the GitHub release. The tag is the version; nothing in the repository
+carries it. Before 1.0 a breaking change raises the minor.
+
 ## Not here yet
 
 Child calls and workflows; several returns, enums, dictionaries and dates as ports; registering

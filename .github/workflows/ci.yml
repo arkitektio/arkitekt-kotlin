@@ -57,3 +57,30 @@ jobs:
           path: build/reports/tests/**
           retention-days: 7
           if-no-files-found: ignore
+
+  # A push to main that carries a feature or a fix is a release, once the two jobs above are
+  # green: semantic-release (releaserc.toml) reads the Conventional Commits since the last
+  # `vX.Y.Z` tag, tags the next version and creates the GitHub release. The tag is the version
+  # (build.gradle.kts reads it as `-PlibraryVersion`), so nothing is committed back.
+  release:
+    name: Release
+    needs: [build, integration]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the whole history and its tags: what the next version is read from
+      - name: semantic-release
+        uses: python-semantic-release/python-semantic-release@v10
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          config_file: releaserc.toml
+          commit: false
+          changelog: false
