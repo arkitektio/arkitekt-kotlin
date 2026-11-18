@@ -4,6 +4,7 @@ import com.apollographql.apollo.api.Optional
 import kotlinx.serialization.json.JsonElement
 import live.arkitekt.rekuest.graphql.type.ActionKind
 import live.arkitekt.rekuest.graphql.type.ArgPortInput
+import live.arkitekt.rekuest.graphql.type.AssignWidgetInput
 import live.arkitekt.rekuest.graphql.type.BlokImplementationInput
 import live.arkitekt.rekuest.graphql.type.DefinitionInput
 import live.arkitekt.rekuest.graphql.type.ImplementAgentInput
@@ -69,13 +70,17 @@ class Ports {
     internal val args = mutableListOf<ArgPortInput>()
     internal val returns = mutableListOf<ReturnPortInput>()
 
-    /** An argument. [identifier] names the structure of a `STRUCTURE` port (`@mikro/lens`). */
+    /**
+     * An argument. [identifier] names the structure of a `STRUCTURE` port (`@mikro/arraylens`),
+     * [widget] how a person fills it in (for a structure, its [Structure.widget]).
+     */
     fun arg(
             key: String,
             kind: PortKind,
             description: String? = null,
             identifier: String? = null,
-            nullable: Boolean? = false
+            nullable: Boolean? = false,
+            widget: AssignWidgetInput? = null
     ) {
         args +=
                 ArgPortInput(
@@ -83,7 +88,8 @@ class Ports {
                         kind = kind,
                         identifier = Optional.presentIfNotNull(identifier),
                         description = Optional.presentIfNotNull(description),
-                        nullable = Optional.presentIfNotNull(nullable)
+                        nullable = Optional.presentIfNotNull(nullable),
+                        widget = Optional.presentIfNotNull(widget)
                 )
     }
 

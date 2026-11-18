@@ -137,8 +137,13 @@ internal fun port(portClass: String, key: String, plan: Plan, nullable: Boolean,
                     "nullable = Optional.present($nullable)$constrained"
     return when (val kind = plan.kind) {
         is Kind.Scalar -> "$portClass(kind = PortKind.${kind.port}, $base)"
-        is Kind.Struct ->
-                "$portClass(kind = PortKind.STRUCTURE, identifier = Optional.present(${kind.qualified}.identifier), $base)"
+        is Kind.Struct -> {
+            // An argument is drawn with the structure's own widget, when it declares one.
+            val widget =
+                    if (portClass == "ArgPortInput") ", widget = Optional.presentIfNotNull(${kind.qualified}.widget)"
+                    else ""
+            "$portClass(kind = PortKind.STRUCTURE, identifier = Optional.present(${kind.qualified}.identifier), $base$widget)"
+        }
         is Kind.ListOf -> {
             // A list has one child, keyed "..." as the other SDKs key it.
             val child = port(portClass, "...", kind.item, kind.item.nullable, null)

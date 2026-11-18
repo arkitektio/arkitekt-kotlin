@@ -1,6 +1,9 @@
 package live.arkitekt
 
+import com.apollographql.apollo.api.Optional
 import kotlinx.serialization.json.JsonElement
+import live.arkitekt.rekuest.graphql.type.AssignWidgetInput
+import live.arkitekt.rekuest.graphql.type.AssignWidgetKind
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -105,7 +108,28 @@ interface Structure<T> {
      * and read off the value here. A second round trip to describe is an antipattern.
      */
     fun describe(value: T): Map<String, JsonElement> = emptyMap()
+
+    /**
+     * The widget every argument port of this structure is drawn with: how a person picks one
+     * in a form. The Python SDK's structures declare theirs the same way; usually a
+     * [searchWidget] over the service that holds them. None by default (the frontend then has
+     * only an id to ask for).
+     */
+    val widget: AssignWidgetInput? get() = null
 }
+
+/**
+ * A widget that searches [ward] (the service, as `mikro`) with [query] for the value of a port:
+ * a GraphQL document answering `options { value label }` for `$search`, `$values` and, when it
+ * declares them, the port's own `$requires`. The structure's service publishes these queries;
+ * take its document as it is written there, so every SDK sends the same widget.
+ */
+fun searchWidget(query: String, ward: String): AssignWidgetInput =
+        AssignWidgetInput(
+                kind = AssignWidgetKind.SEARCH,
+                query = Optional.present(query),
+                ward = Optional.present(ward)
+        )
 
 /** A [Structure] that is its id and nothing more: nothing is fetched to expand it. */
 open class IdStructure<T>(
