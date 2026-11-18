@@ -188,6 +188,7 @@ literal, not as a string built at run time.
 | `FaktsClient`, `TokenManager`, `FaktsCache` | The login: discovery, the OAuth2 device-code grant, token rotation, the kept login |
 | `Agent`, `Journal`, `AgentMessage`/`AgentEvent` | The agent socket (`/agi`), agent protocol 2: numbered and acknowledged in both directions |
 | `Unlok`, `Rekuest`, `graphqlClient` | The two clients every app has, and the authenticated Apollo client others are built on |
+| `MeshOptions`, `Meshd`, `MeshNode`, `MeshProxy` | Services only on the deployment's mesh, reached through an arkitekt-meshd of the app's own |
 
 ## Services
 
@@ -218,6 +219,35 @@ A scope that is not asked for is not in the token, and the operation that needs 
 at run time. Hold the list to the schema with a test, as `ScopesTest` does for this library's
 own operations (`requiredScopes(folder)` reads a folder of `*.graphqls` and `*.graphql`). A
 login that was kept from before a scope was added has to be made again.
+
+## The mesh
+
+A deployment can offer a service only on its mesh (an alias of `kind: "mesh"`). The app reaches
+it as Python's arkitekt does: the login asks for a mesh key, and when none of a service's other
+aliases answers, an [arkitekt-meshd](https://github.com/arkitektio/arkitekt-mesh) of the app's
+own is started (once per login) and the mesh aliases are reached through its local HTTP proxy.
+The node keeps its state under the per-user state directory (`arkitekt/mesh`, beside Python's),
+so it joins with the key once; it stops with `Connection.close()`, or with the JVM.
+
+meshd is a binary, one per platform. `live.arkitekt:arkitekt-kotlin-meshd` carries all six
+(Linux, macOS and Windows, x86_64 and arm64; ~21 MB) as resources, pinned by release and by hash
+(`meshd/meshd.sha256`); the one for this machine is copied out once per version and checked
+against its hash before every start. Depend on it beside the library to get the mesh:
+
+```kotlin
+implementation("live.arkitekt:arkitekt-kotlin-meshd")
+```
+
+Without it (or set `ARKITEKT_MESHD` to a binary of your own), mesh aliases are skipped and the
+login asks for no key. `Runtime(app, mesh = MeshOptions(...))`, or `ARKITEKT_MESH` (`0`,
+`force`), turns it off or makes it the only way. A client of a service built on its alias reaches
+it through the mesh by itself: `graphqlClient`, or `ApolloClient.Builder().reaching(alias)`, or
+`alias.httpClient()` for OkHttp; any other client takes `alias.mesh` (the proxy, with
+credentials) as its HTTP proxy. A login kept from before the mesh has no key: log in again.
+
+To bundle another meshd release, raise `meshdVersion` in `meshd/build.gradle.kts` and replace
+`meshd/meshd.sha256` with that release's `SHA256SUMS` (plus the hash of its
+`THIRD_PARTY_LICENSES`).
 
 ## Build
 

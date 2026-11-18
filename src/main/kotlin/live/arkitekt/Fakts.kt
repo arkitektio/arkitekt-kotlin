@@ -3,7 +3,10 @@ package live.arkitekt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
@@ -31,7 +34,7 @@ import java.io.File
 // =========================================================================================
 
 // Shared lenient JSON for all fakts payloads. `ignoreUnknownKeys` is load-bearing: a real
-// discovery document also carries mesh_*/hub_* members we deliberately ignore, and the flat
+// discovery document also carries hub_* members we deliberately ignore, and the flat
 // grant response is decoded twice (once as a token, once as an envelope), each pass ignoring
 // the other's fields. `encodeDefaults` governs *requests* too — a defaulted property here goes
 // on the wire, so only declare request fields we actually mean to send.
@@ -85,7 +88,9 @@ data class FaktsEndpoint(
         val issuer: String? = null,
         val jwks_uri: String? = null,
         val grant_types_supported: List<String> = emptyList(),
-        val token_endpoint_auth_methods_supported: List<String> = emptyList()
+        val token_endpoint_auth_methods_supported: List<String> = emptyList(),
+        // The mesh's coordination server, for a mesh key granted without one.
+        val mesh_coord_url: String? = null
 ) {
     // The one and only use of `base_url`; every other endpoint arrives fully qualified.
     val report_endpoint: String
@@ -98,10 +103,13 @@ data class FaktsEndpoint(
 // wire. The server also accepts `expiration_time_seconds` (clamped to 900), `redirect_uris`,
 // `requested_client_role` (interface|agent, default interface), `request_public` and
 // `supported_layers` — all left to their server-side defaults.
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class DeviceAuthorizationRequest(
         val manifest: Manifest,
-        val requested_client_kind: String = "desktop"
+        val requested_client_kind: String = "desktop",
+        // Ask for a key to join the deployment's mesh with (see Mesh.kt). Sent only when asked.
+        @EncodeDefault(EncodeDefault.Mode.NEVER) val request_auth_key: Boolean = false
 )
 
 @Serializable
@@ -174,8 +182,34 @@ data class Alias(
         val ssl: Boolean,
         val path: String? = null,
         val challenge: String = "",
-        val public: Boolean? = null
+        val public: Boolean? = null,
+        // How the server reaches the instance: "absolute", "mesh" (only over the deployment's
+        // mesh) or "docker". Older servers do not send it.
+        val kind: String? = null,
+        // Where the address works: loopback, internal, lan, mesh or public. Older servers do not
+        // send it.
+        val reach: String? = null,
+        // The mesh proxy this alias is reached through, set when it was resolved over the mesh.
+        // Never sent or cached.
+        @Transient val mesh: MeshProxy? = null
 ) {
+    /**
+     * Whether this alias is only reachable over the mesh: the server says so with [kind], or,
+     * from a server that does not, its host is in the tailnet range 100.64.0.0/10.
+     */
+    fun isMesh(): Boolean {
+        kind?.let { return it == "mesh" }
+        val octets = host.split('.').map { it.toIntOrNull() ?: return false }
+        return octets.size == 4 && octets[0] == 100 && octets[1] in 64..127
+    }
+
+    /** Whether this alias only works inside the deployment's own network. */
+    fun isInternal(): Boolean = reach == "internal" || kind == "docker"
+
+    /** A client that reaches this alias: [base], or [base] through the mesh when it is reached so. */
+    fun httpClient(base: OkHttpClient = MESH_HTTP): OkHttpClient = mesh?.okHttp(base) ?: base
+
+
     public fun to_http_path(append: String?): String {
         val protocol = if (ssl) "https" else "http"
         val portPart = when (port) {
@@ -229,7 +263,9 @@ data class SelfFakt(val deployment_name: String, val alias: Alias)
 data class ActiveFakts(
         val self: SelfFakt,
         val instances: Map<String, Instance>,
-        val statuses: Map<String, String> = emptyMap()
+        val statuses: Map<String, String> = emptyMap(),
+        // The mesh key: sent once, with the first token, when one was asked for and granted.
+        val mesh: MeshClaim? = null
 )
 
 // Outcome of a single requirement. The server only ever emits granted/denied/unavailable;
@@ -322,45 +358,67 @@ class FaktsCache(private val file: File) {
 
 // ---- Alias resolution ---------------------------------------------------------------------
 
-// Challenge each alias of a service (GET on its challenge URL must answer 200 iff reachable)
-// and keep the first that answers. `challenge` is a path fragment, not a nonce.
-suspend fun getFirstReachableAlias(instance: Instance): Alias? {
-    val client = OkHttpClient()
+private val CHALLENGE_HTTP = OkHttpClient()
 
-    for (alias in instance.aliases) {
-        val url = alias.to_http_path(alias.challenge)
-        val isReachable = try {
-            // Execute HTTP request in IO context
-            withContext(Dispatchers.IO) {
-                val request = Request.Builder().url(url).get().build()
-                val response = client.newCall(request).execute()
-                response.use { it.isSuccessful }
-            }
-        } catch (e: Exception) {
-            println("Couldn't reach alias at ${alias.to_http_path(alias.challenge)}")
-            false // If exception occurs, alias is not reachable
+// Challenge one alias: a GET on its challenge URL answers 2xx iff it is reachable. `challenge`
+// is a path fragment, not a nonce.
+private suspend fun challenge(alias: Alias): Boolean {
+    val url = alias.to_http_path(alias.challenge)
+    return try {
+        withContext(Dispatchers.IO) {
+            val client = if (alias.mesh != null) alias.httpClient() else CHALLENGE_HTTP
+            val request = Request.Builder().url(url).get().build()
+            client.newCall(request).execute().use { it.isSuccessful }
         }
+    } catch (e: Exception) {
+        println("Couldn't reach alias at $url${if (alias.mesh != null) " over the mesh" else ""}: ${e.message}")
+        false
+    }
+}
 
-        if (isReachable) {
-            return alias // Return immediately if an alias is reachable
+/**
+ * The first alias of [instance] that answers its challenge, or null.
+ *
+ * Aliases that are not on the mesh come first, in order. Only when none answers is the mesh
+ * tried: [mesh]'s node is started (once, for every service) and the mesh aliases challenged
+ * through it, again for a while if the node has only just started. A forced mesh tries only
+ * the mesh aliases. Without [mesh], mesh aliases are not tried.
+ */
+suspend fun getFirstReachableAlias(instance: Instance, mesh: MeshRoute? = null): Alias? {
+    if (mesh?.forced != true) {
+        for (alias in instance.aliases) {
+            if (alias.isMesh()) continue
+            if (challenge(alias)) return alias
         }
     }
 
-    return null // Return null if no alias is reachable
+    val onMesh = instance.aliases.filter { it.isMesh() }
+    if (onMesh.isEmpty() || mesh == null) return null
+    val proxy = mesh.proxy() ?: return null
+    while (true) {
+        for (alias in onMesh) {
+            val routed = alias.copy(mesh = proxy)
+            if (challenge(routed)) return routed
+        }
+        // Its peers may not know the node yet: give them until it has settled.
+        if (!mesh.settling()) return null
+        delay(1000)
+    }
 }
 
 // Resolve every granted instance to its first reachable alias.
-suspend fun buildInstanceMap(fakts: ActiveFakts): Map<String, Alias> {
+suspend fun buildInstanceMap(fakts: ActiveFakts, mesh: MeshRoute? = null): Map<String, Alias> {
 
     val instanceMap = mutableMapOf<String, Alias>()
 
     fakts.instances.forEach { (instanceName, instance) ->
-        val alias = getFirstReachableAlias(instance)
+        val alias = getFirstReachableAlias(instance, mesh)
         if (alias != null) {
             instanceMap[instanceName] = alias
         }
         else {
-            println("No reachable alias found for instance $instanceName")
+            val why = mesh?.error?.takeIf { instance.aliases.any { it.isMesh() } }?.let { " (mesh: ${it.message})" } ?: ""
+            println("No reachable alias found for instance $instanceName$why")
         }
     }
 
@@ -417,8 +475,14 @@ open class FaktsClient(private val client: OkHttpClient = OkHttpClient()) {
 
     // --- 2. Device authorization ----------------------------------------------------------
 
-    suspend fun deviceAuthorize(endpoint: FaktsEndpoint, manifest: Manifest): DeviceAuthorization {
-        val body = faktsJson.encodeToString(DeviceAuthorizationRequest(manifest = manifest))
+    suspend fun deviceAuthorize(
+            endpoint: FaktsEndpoint,
+            manifest: Manifest,
+            requestAuthKey: Boolean = false
+    ): DeviceAuthorization {
+        val body = faktsJson.encodeToString(
+                DeviceAuthorizationRequest(manifest = manifest, request_auth_key = requestAuthKey)
+        )
 
         // The throttler answers 429 {"error":"slow_down"} — back off and retry the start rather
         // than failing the whole login.

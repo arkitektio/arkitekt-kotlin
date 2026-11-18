@@ -140,7 +140,8 @@ class TokenManager(
         // A refresh may legitimately arrive without an envelope: the server appends it
         // best-effort and returns the plain token rather than failing the grant when rendering
         // the instances throws. Keep the config we already hold and pick up a re-render next time.
-        val fakts = result.fakts ?: faktsState
+        // The mesh key comes once, with the first token: a refreshed envelope never carries it.
+        val fakts = result.fakts?.let { it.copy(mesh = it.mesh ?: faktsState.mesh) } ?: faktsState
 
         tokenState = result.token
         faktsState = fakts

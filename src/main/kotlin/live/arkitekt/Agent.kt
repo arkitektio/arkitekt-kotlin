@@ -7,6 +7,8 @@ import live.arkitekt.rekuest.graphql.EnsureAgentMutation
 import live.arkitekt.rekuest.graphql.ImplementAgentMutation
 import live.arkitekt.rekuest.graphql.type.AgentInput
 import io.ktor.client.*
+import io.ktor.client.engine.cio.CIO
+import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.websocket.*
 import io.ktor.client.request.*
 import io.ktor.websocket.*
@@ -356,7 +358,15 @@ public class Agent(
             // toward the retry-budget refund.
             var connectedAt: Long? = null
 
-            val wsClient = HttpClient { install(WebSockets) }
+            // Over the mesh, the socket is a tunnel through the node's proxy (OkHttp's engine
+            // takes the tunnelling client); otherwise CIO, named so that which engine the
+            // classpath happens to list first never decides.
+            val wsClient = alias.mesh?.let {
+                HttpClient(OkHttp) {
+                    engine { preconfigured = alias.httpClient() }
+                    install(WebSockets)
+                }
+            } ?: HttpClient(CIO) { install(WebSockets) }
 
             try {
                 val session = wsClient.webSocketSession { url(alias.to_ws_path("agi")) }

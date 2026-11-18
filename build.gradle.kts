@@ -28,12 +28,17 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.ktor:ktor-client-core:3.0.2")
     implementation("io.ktor:ktor-client-cio:3.0.2")
+    // The agent socket over the mesh: OkHttp's engine takes the client that tunnels through
+    // the mesh node's proxy (Mesh.kt).
+    implementation("io.ktor:ktor-client-okhttp:3.0.2")
     implementation("io.ktor:ktor-client-websockets:3.0.2")
 
     // The processor, run over the test sources: its output is what DeclaredActionTest checks.
     kspTest(project(":arkitekt-kotlin-ksp"))
 
     testImplementation(kotlin("test"))
+    // The bundled meshd, so MeshTest can start it as an app would (no server: it must refuse).
+    testRuntimeOnly(project(":arkitekt-kotlin-meshd"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("io.ktor:ktor-server-core:3.0.2")
     testImplementation("io.ktor:ktor-server-netty:3.0.2")

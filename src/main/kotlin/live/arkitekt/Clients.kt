@@ -8,6 +8,7 @@ import com.apollographql.apollo.api.http.HttpRequest
 import com.apollographql.apollo.api.http.HttpResponse
 import com.apollographql.apollo.interceptor.ApolloInterceptor
 import com.apollographql.apollo.interceptor.ApolloInterceptorChain
+import com.apollographql.apollo.network.okHttpClient
 import com.apollographql.apollo.network.http.HttpInterceptor
 import com.apollographql.apollo.network.http.HttpInterceptorChain
 import kotlinx.coroutines.flow.Flow
@@ -57,11 +58,20 @@ class LogInterceptor(val service_name: String) : HttpInterceptor {
 fun graphqlClient(alias: Alias, tokens: TokenManager, name: String): ApolloClient =
         ApolloClient.Builder()
                 .serverUrl(alias.to_http_path("graphql"))
+                .reaching(alias)
                 .addHttpInterceptor(AuthorizationInterceptor { tokens.accessToken() })
                 .addHttpInterceptor(LogInterceptor(name))
                 .addInterceptor(AuthRetryInterceptor(tokens))
                 .addInterceptor(ErrorLoggingInterceptor())
                 .build()
+
+/**
+ * Reach [alias] the way it was resolved: through the mesh node's proxy when it is a mesh alias
+ * (see Mesh.kt), with Apollo's own HTTP client otherwise. Every Apollo client of a service
+ * should be built with it.
+ */
+fun ApolloClient.Builder.reaching(alias: Alias): ApolloClient.Builder =
+        if (alias.mesh != null) okHttpClient(alias.httpClient()) else this
 
 /** Lok, the deployment itself: who is logged in. */
 class Unlok(alias: Alias, tokens: TokenManager) {
