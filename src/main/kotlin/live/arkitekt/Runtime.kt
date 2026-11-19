@@ -260,12 +260,26 @@ class Runtime(
             return "Required service(s) not granted: $detail" to emptyMap()
         }
 
-        val instances = buildInstanceMap(session.fakts, mesh)
-        val unreachable = requiredKeys.filter { instances[it] == null }
-        val failure =
-                if (unreachable.isEmpty()) null
-                else "No reachable alias for required service(s): ${unreachable.joinToString()}" +
-                        (mesh?.error?.let { " (the mesh: ${it.message})" } ?: "")
+        val policy = AliasPolicy.fromEnv()
+        val instances = buildInstanceMap(session.fakts, mesh, policy)
+        val (excluded, unreachable) = requiredKeys.filter { instances[it] == null }.partition { key ->
+            session.fakts.instances[key]?.let { excludedByPolicy(it, policy) } == true
+        }
+        val failures = buildList {
+            if (excluded.isNotEmpty()) {
+                add(
+                        "Every alias of required service(s) ${excluded.joinToString()} is excluded by " +
+                                "this client's alias policy ($ALIAS_EXCLUDE_ENV / $ALIAS_EXCLUDE_REACH_ENV)"
+                )
+            }
+            if (unreachable.isNotEmpty()) {
+                add(
+                        "No reachable alias for required service(s): ${unreachable.joinToString()}" +
+                                (mesh?.error?.let { " (the mesh: ${it.message})" } ?: "")
+                )
+            }
+        }
+        val failure = failures.takeIf { it.isNotEmpty() }?.joinToString("; ")
         return failure to instances
     }
 

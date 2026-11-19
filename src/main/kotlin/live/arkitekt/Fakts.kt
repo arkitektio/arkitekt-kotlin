@@ -189,6 +189,9 @@ data class Alias(
         // Where the address works: loopback, internal, lan, mesh or public. Older servers do not
         // send it.
         val reach: String? = null,
+        // The server's ranking of this alias among its instance's: lower is tried first. Older
+        // servers do not send it; an alias without one comes after every alias with one.
+        val priority: Int? = null,
         // The mesh proxy this alias is reached through, set when it was resolved over the mesh.
         // Never sent or cached.
         @Transient val mesh: MeshProxy? = null
@@ -376,23 +379,101 @@ private suspend fun challenge(alias: Alias): Boolean {
     }
 }
 
+const val ALIAS_PREFER_REACH_ENV = "FAKTS_ALIAS_PREFER_REACH"
+const val ALIAS_EXCLUDE_REACH_ENV = "FAKTS_ALIAS_EXCLUDE_REACH"
+const val ALIAS_EXCLUDE_ENV = "FAKTS_ALIAS_EXCLUDE"
+
+/**
+ * This client's own say over which aliases it uses, on top of the server's.
+ *
+ * The server hands every instance's aliases ranked ([Alias.priority]) and the client follows
+ * that. A policy can only narrow it: drop aliases by reach or id, and try some reaches before
+ * the server's ranking. It never adds an alias. Mirrors Python fakts' `AliasPolicy`.
+ */
+data class AliasPolicy(
+        /** Reaches tried first, in this order; the server's ranking decides within each. */
+        val preferReach: List<String> = emptyList(),
+        /** Reaches never used. */
+        val excludeReach: List<String> = emptyList(),
+        /** Alias ids never used. */
+        val excludeAliases: List<String> = emptyList()
+) {
+    /** Whether this policy never uses [alias]. */
+    fun excludes(alias: Alias): Boolean =
+            (alias.id != null && alias.id in excludeAliases) ||
+                    (alias.reach != null && alias.reach in excludeReach)
+
+    /** Where [alias]'s reach comes in [preferReach]; after all of them if not listed. */
+    fun reachRank(alias: Alias): Int {
+        val index = alias.reach?.let { preferReach.indexOf(it) } ?: -1
+        return if (index >= 0) index else preferReach.size
+    }
+
+    companion object {
+        /**
+         * The policy `FAKTS_ALIAS_PREFER_REACH`, `FAKTS_ALIAS_EXCLUDE_REACH` and
+         * `FAKTS_ALIAS_EXCLUDE` (comma-separated) describe; empty when none is set.
+         */
+        fun fromEnv(env: (String) -> String? = System::getenv): AliasPolicy {
+            fun list(name: String): List<String> =
+                    (env(name) ?: "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+            return AliasPolicy(
+                    preferReach = list(ALIAS_PREFER_REACH_ENV),
+                    excludeReach = list(ALIAS_EXCLUDE_REACH_ENV),
+                    excludeAliases = list(ALIAS_EXCLUDE_ENV)
+            )
+        }
+    }
+}
+
+/**
+ * [aliases] in the order this client tries them (Python fakts' `ranked_view`).
+ *
+ * Aliases [policy] excludes are dropped; reaches it prefers come first. Then the server's
+ * ranking ([Alias.priority], lower first; an alias without one after those with one), then the
+ * server's own order. With no priorities and no policy the order is unchanged.
+ */
+fun rankAliases(aliases: List<Alias>, policy: AliasPolicy? = null): List<Alias> {
+    val kept = if (policy == null) aliases else aliases.filterNot { policy.excludes(it) }
+    return kept.withIndex()
+            .sortedWith(
+                    compareBy<IndexedValue<Alias>>(
+                            { policy?.reachRank(it.value) ?: 0 },
+                            { it.value.priority == null },
+                            { it.value.priority ?: 0 },
+                            { it.index }
+                    )
+            )
+            .map { it.value }
+}
+
+/** Whether [policy] leaves none of [instance]'s aliases (while the server listed some). */
+fun excludedByPolicy(instance: Instance, policy: AliasPolicy?): Boolean =
+        instance.aliases.isNotEmpty() && rankAliases(instance.aliases, policy).isEmpty()
+
 /**
  * The first alias of [instance] that answers its challenge, or null.
  *
- * Aliases that are not on the mesh come first, in order. Only when none answers is the mesh
- * tried: [mesh]'s node is started (once, for every service) and the mesh aliases challenged
- * through it, again for a while if the node has only just started. A forced mesh tries only
- * the mesh aliases. Without [mesh], mesh aliases are not tried.
+ * The aliases are tried in the order [rankAliases] gives them under [policy]. Aliases that are
+ * not on the mesh come first. Only when none answers is the mesh tried: [mesh]'s node is
+ * started (once, for every service) and the mesh aliases challenged through it, again for a
+ * while if the node has only just started. A forced mesh tries only the mesh aliases. Without
+ * [mesh], mesh aliases are not tried.
  */
-suspend fun getFirstReachableAlias(instance: Instance, mesh: MeshRoute? = null): Alias? {
+suspend fun getFirstReachableAlias(
+        instance: Instance,
+        mesh: MeshRoute? = null,
+        policy: AliasPolicy? = AliasPolicy.fromEnv()
+): Alias? {
+    val ranked = rankAliases(instance.aliases, policy)
     if (mesh?.forced != true) {
-        for (alias in instance.aliases) {
+        for (alias in ranked) {
             if (alias.isMesh()) continue
             if (challenge(alias)) return alias
         }
     }
 
-    val onMesh = instance.aliases.filter { it.isMesh() }
+    val onMesh = ranked.filter { it.isMesh() }
     if (onMesh.isEmpty() || mesh == null) return null
     val proxy = mesh.proxy() ?: return null
     while (true) {
@@ -407,17 +488,28 @@ suspend fun getFirstReachableAlias(instance: Instance, mesh: MeshRoute? = null):
 }
 
 // Resolve every granted instance to its first reachable alias.
-suspend fun buildInstanceMap(fakts: ActiveFakts, mesh: MeshRoute? = null): Map<String, Alias> {
+suspend fun buildInstanceMap(
+        fakts: ActiveFakts,
+        mesh: MeshRoute? = null,
+        policy: AliasPolicy? = AliasPolicy.fromEnv()
+): Map<String, Alias> {
 
     val instanceMap = mutableMapOf<String, Alias>()
 
     fakts.instances.forEach { (instanceName, instance) ->
-        val alias = getFirstReachableAlias(instance, mesh)
+        val alias = getFirstReachableAlias(instance, mesh, policy)
         if (alias != null) {
             instanceMap[instanceName] = alias
         }
+        else if (excludedByPolicy(instance, policy)) {
+            println(
+                    "Every alias of instance $instanceName is excluded by this client's alias policy " +
+                            "($ALIAS_EXCLUDE_ENV / $ALIAS_EXCLUDE_REACH_ENV)"
+            )
+        }
         else {
-            val why = mesh?.error?.takeIf { instance.aliases.any { it.isMesh() } }?.let { " (mesh: ${it.message})" } ?: ""
+            val ranked = rankAliases(instance.aliases, policy)
+            val why = mesh?.error?.takeIf { ranked.any { it.isMesh() } }?.let { " (mesh: ${it.message})" } ?: ""
             println("No reachable alias found for instance $instanceName$why")
         }
     }
